@@ -151,22 +151,24 @@ The installer sets up auto-start on login, but you can also start manually.
 
 ## Tools Reference
 
-### Navigation & Reading
+> **Note:** This server provides tools that **complement** Cursor's built-in tools.  
+> For basic operations like Read, Write, Delete, Grep, use Cursor's native tools.
+
+### Code Intelligence (AST-powered)
 
 | Tool | Description |
 |------|-------------|
-| `get_file_tree` | Get project structure with configurable depth |
-| `read_file` | Read file content with optional line range |
-| `get_file_outline` | Get function/class definitions (AST-powered) |
+| `get_file_outline` | Get function/class definitions with line numbers |
 | `extract_code_element` | Extract specific function/class with context |
+| `find_references` | Find all usages of a symbol across project |
+| `find_large_files` | Find files exceeding line threshold |
 
-### Search & Analysis
+### Advanced Search
 
 | Tool | Description |
 |------|-------------|
-| `search_code` | High-performance ripgrep search with modes: |
-|  | • `fast` - Pure ripgrep text search |
-|  | • `smart` - ripgrep + AST classification |
+| `search_code` | Semantic code search with modes: |
+|  | • `smart` - ripgrep + AST classification (default) |
 |  | • `definitions` - Find only declarations |
 |  | • `usages` - Find only references |
 |  | • `imports` - Find import statements |
@@ -174,19 +176,18 @@ The installer sets up auto-start on login, but you can also start manually.
 |  | • `secrets` - Find potential hardcoded secrets |
 |  | • `count` - Count matches only |
 |  | • `files` - List files with matches |
-| `find_references` | Find all usages of a symbol across project |
-| `find_large_files` | Find files exceeding line threshold |
-| `lint_file` | Multi-layer code analysis (AST + linters) |
-| `lint_code` | Lint raw code string without file |
 
-### File Operations (via Bridge)
+### Code Validation
 
 | Tool | Description |
 |------|-------------|
-| `create_file` | Create or overwrite file (with backup) |
-| `delete_file` | Delete file (with backup) |
-| `simple_replace` | Find and replace text |
-| `replace_exact_line` | Replace specific line |
+| `lint_code` | Validate code string before writing to file |
+
+### Smart Patching
+
+| Tool | Description |
+|------|-------------|
+| `replace_exact_line` | Replace specific line (exact match) |
 | `insert_at_line` | Insert content at line number |
 | `replace_line_range` | Replace range of lines |
 | `insert_relative_to_marker` | Insert before/after marker text |
@@ -195,13 +196,13 @@ The installer sets up auto-start on login, but you can also start manually.
 | `prepend_to_file` | Add content to start of file |
 | `apply_diff` | Apply unified diff patch |
 
-### AST Operations (Refactoring)
+### AST Refactoring
 
 | Tool | Description |
 |------|-------------|
-| `ast_replace_element` | Replace function/class by name (AST-powered) |
-| `ast_rename_symbol` | Rename variable/function/class throughout file |
-| `ast_add_import` | Add import statement at correct location |
+| `ast_replace_element` | Replace function/class by name |
+| `ast_rename_symbol` | Rename variable/function/class |
+| `ast_add_import` | Add import at correct location |
 
 ### Backup & Recovery
 
@@ -211,17 +212,12 @@ The installer sets up auto-start on login, but you can also start manually.
 | `show_diff` | Show diff between current and backup |
 | `restore_backup` | Restore file from backup |
 
-### Batch Operations
+### Batch & Sandbox
 
 | Tool | Description |
 |------|-------------|
 | `batch_smart_apply` | Execute multiple operations in sequence |
-
-### Terminal (Docker sandbox)
-
-| Tool | Description |
-|------|-------------|
-| `run_terminal` | Execute command in Docker container |
+| `run_sandbox_terminal` | Execute command in isolated Docker sandbox |
 
 ## Path Handling
 

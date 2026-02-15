@@ -299,125 +299,8 @@ const server = new McpServer({
 });
 
 // =============================================================================
-// CATEGORY 1: Navigation & Reading
+// CATEGORY 1: Code Intelligence (AST-powered)
 // =============================================================================
-
-server.tool(
-    'get_file_tree',
-    `[ISOLATED DOCKER ENV] Get file tree structure for code exploration.
-• Accepts Windows paths (C:\\Users\\...) OR Linux paths - auto-converts!
-• Filters out node_modules, .git, dist, build automatically
-• Use for understanding project structure before editing
-• Examples: "C:\\Users\\user\\project" or "Users/user/project" both work`,
-    {
-        path: z.string().optional().describe('Path (Windows like C:\\path or Linux like path/to/dir). Default: workspace root'),
-        max_depth: z.number().optional().describe('Directory depth limit (default: 3)')
-    },
-    async ({ path: inputPath = '.', max_depth = 3 }) => {
-        try {
-            const tree = await bridge.listDir(inputPath, max_depth);
-            return { content: [{ type: 'text', text: JSON.stringify(tree, null, 2) }] };
-        } catch (e) {
-            // Fallback to local if bridge fails
-            const targetPath = resolveSafePath(inputPath);
-            const tree = getProjectStructure(targetPath, 0, max_depth);
-            return { content: [{ type: 'text', text: JSON.stringify(tree, null, 2) }] };
-        }
-    }
-);
-
-server.tool(
-    'read_file',
-    `[ISOLATED DOCKER ENV] Read file content with optional line range.
-• Accepts Windows paths (C:\\path) OR Linux paths - auto-converts!
-• Blocks files >3000 lines without range (use line_start/line_end)
-• Examples: "C:\\Users\\user\\file.js" or "Users/user/file.js" both work
-• Returns JSON with file metadata + content`,
-    {
-        path: z.string().describe('File path (Windows C:\\path\\file.js or Linux path/file.js)'),
-        line_start: z.number().optional().describe('Start line number (1-based, inclusive)'),
-        line_end: z.number().optional().describe('End line number (1-based, inclusive)'),
-        force_full: z.boolean().optional().describe('Force full read even for large files')
-    },
-    async ({ path: inputPath, line_start, line_end, force_full = false }) => {
-        if (isSensitivePath(inputPath)) {
-            throw new Error(`Security: Access to sensitive file '${inputPath}' is prohibited`);
-        }
-        
-        try {
-            // Try bridge first
-            let content = await bridge.readFile(inputPath);
-            const totalLines = content.split('\n').length;
-            
-            // Block large files unless range specified or force
-            if (!force_full && totalLines > MAX_LINES && !line_start && !line_end) {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            status: 'TRUNCATED',
-                            file: inputPath,
-                            total_lines: totalLines,
-                            limit: MAX_LINES,
-                            message: `File too large (${totalLines} lines). Use line_start/line_end or extract_code_element.`
-                        })
-                    }]
-                };
-            }
-            
-            if (line_start !== undefined || line_end !== undefined) {
-                const lines = content.split('\n');
-                const start = Math.max(0, (line_start || 1) - 1);
-                const end = Math.min(lines.length, line_end || lines.length);
-                content = lines.slice(start, end).join('\n');
-            }
-            
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({ file: inputPath, total_lines: totalLines, content })
-                }]
-            };
-        } catch (e) {
-            // Fallback to local
-            const filePath = resolveSafePath(inputPath);
-            if (!fs.existsSync(filePath)) {
-                throw new Error(`File not found: ${inputPath}`);
-            }
-            let content = fs.readFileSync(filePath, 'utf-8');
-            const totalLines = content.split('\n').length;
-            
-            if (!force_full && totalLines > MAX_LINES && !line_start && !line_end) {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            status: 'TRUNCATED',
-                            file: inputPath,
-                            total_lines: totalLines,
-                            limit: MAX_LINES,
-                            message: `File too large (${totalLines} lines). Use line_start/line_end or extract_code_element.`
-                        })
-                    }]
-                };
-            }
-            
-            if (line_start !== undefined || line_end !== undefined) {
-                const lines = content.split('\n');
-                const start = Math.max(0, (line_start || 1) - 1);
-                const end = Math.min(lines.length, line_end || lines.length);
-                content = lines.slice(start, end).join('\n');
-            }
-            
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({ file: inputPath, total_lines: totalLines, content })
-                }]
-            };
-        }
-    }
-);
 
 server.tool(
     'get_file_outline',
@@ -559,8 +442,7 @@ server.tool(
 
 server.tool(
     'search_code',
-    `[RIPGREP + AST] High-performance code search with semantic understanding.
-• FAST mode: Pure ripgrep - blazing fast text search
+    `[RIPGREP + AST] Advanced code search with semantic understanding.
 • SMART mode: ripgrep + AST classification (definition vs usage)
 • DEFINITIONS mode: Find only declarations/definitions
 • USAGES mode: Find only references/usages
@@ -569,30 +451,23 @@ server.tool(
 • SECRETS mode: Find potential hardcoded secrets (security audit)
 • COUNT mode: Just count matches (very fast)
 • FILES mode: List files containing matches
-• Automatically filters binary files, node_modules, .git`,
+• Automatically filters binary files, node_modules, .git
+NOTE: For basic text search, use Cursor's built-in Grep tool`,
     {
         term: z.string().optional().describe('Search term or pattern (not needed for todos/secrets modes)'),
         path: z.string().optional().describe('Search scope (default: entire workspace)'),
-        mode: z.enum(['fast', 'smart', 'definitions', 'usages', 'imports', 'todos', 'secrets', 'count', 'files']).optional().describe('Search strategy (default: fast)'),
+        mode: z.enum(['smart', 'definitions', 'usages', 'imports', 'todos', 'secrets', 'count', 'files']).optional().describe('Search strategy (default: smart)'),
         regex: z.boolean().optional().describe('Interpret term as regex pattern'),
         case_sensitive: z.boolean().optional().describe('Case-sensitive matching'),
         max_results: z.number().optional().describe('Maximum results to return (default: 50)')
     },
-    async ({ term = '', path: searchPath = '.', mode = 'fast', regex = false, case_sensitive = false, max_results = 50 }) => {
+    async ({ term = '', path: searchPath = '.', mode = 'smart', regex = false, case_sensitive = false, max_results = 50 }) => {
         const targetPath = resolveSafePath(searchPath);
         const engine = new SearchEngine({ maxResults: max_results });
         
         let results;
         
         switch (mode) {
-            case 'smart':
-                results = await engine.smartSearch(targetPath, term, {
-                    regex,
-                    caseSensitive: case_sensitive,
-                    maxResults: max_results,
-                    classifyResults: true
-                });
-                break;
             case 'definitions':
                 results = await engine.findDefinitions(targetPath, term, { maxResults: max_results });
                 break;
@@ -627,11 +502,13 @@ server.tool(
                     maxResults: max_results
                 });
                 break;
+            case 'smart':
             default:
-                results = await engine.fastSearch(targetPath, term, {
+                results = await engine.smartSearch(targetPath, term, {
                     regex,
                     caseSensitive: case_sensitive,
-                    maxResults: max_results
+                    maxResults: max_results,
+                    classifyResults: true
                 });
         }
         
@@ -690,36 +567,6 @@ server.tool(
 // =============================================================================
 
 server.tool(
-    'lint_file',
-    `[MULTI-LAYER ANALYSIS] Check file for syntax errors, bugs, and code issues.
-• Layer 1: AST syntax validation (Tree-sitter)
-• Layer 2: Language-specific linters (ESLint, flake8, pylint)
-• Layer 3: Common bug pattern detection
-• Returns: errors, warnings, info with line numbers
-• Complementary to Cursor's ReadLints - more comprehensive`,
-    {
-        path: z.string().describe('File path (Windows or Linux style)')
-    },
-    async ({ path: inputPath }) => {
-        const filePath = resolveSafePath(inputPath);
-        
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`File not found: ${inputPath}`);
-        }
-        
-        const linter = new CodeLinter();
-        const results = await linter.lintFile(filePath);
-        
-        return {
-            content: [{
-                type: 'text',
-                text: JSON.stringify(results, null, 2)
-            }]
-        };
-    }
-);
-
-server.tool(
     'lint_code',
     `[MULTI-LAYER ANALYSIS] Check raw code string for issues without needing a file.
 • Perfect for validating code before writing to file
@@ -744,151 +591,8 @@ server.tool(
 );
 
 // =============================================================================
-// CATEGORY 4: File Operations - EXECUTE IMMEDIATELY
+// CATEGORY 4: Smart Patching - EXECUTE IMMEDIATELY
 // =============================================================================
-
-server.tool(
-    'create_file',
-    `[IMMEDIATE EXECUTION] Create a new file or overwrite existing.
-• Automatic backup before overwrite (.mcp-backups/)
-• Creates parent directories if needed
-• EXECUTES IMMEDIATELY - no confirmation dialog
-• Faster than Cursor's Write for bulk operations
-• Use for generating new files or complete rewrites`,
-    {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        content: z.string().describe('Full file content')
-    },
-    async ({ path: inputPath, content }) => {
-        try {
-            const result = await bridge.writeFile(inputPath, content);
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        status: 'success',
-                        action: result.action || 'created',
-                        file: inputPath,
-                        lines: content.split('\n').length,
-                        backup: result.backup
-                    })
-                }]
-            };
-        } catch (e) {
-            // Fallback to local
-            const filePath = resolveSafePath(inputPath);
-            const existed = fs.existsSync(filePath);
-            const dir = path.dirname(filePath);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-            const backupPath = backupFile(filePath);
-            fs.writeFileSync(filePath, content, 'utf-8');
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        status: 'success',
-                        action: existed ? 'overwritten' : 'created',
-                        file: inputPath,
-                        lines: content.split('\n').length,
-                        backup: backupPath
-                    })
-                }]
-            };
-        }
-    }
-);
-
-server.tool(
-    'delete_file',
-    `[IMMEDIATE EXECUTION] Delete a file with automatic backup.
-• Creates backup before deletion (.mcp-backups/)
-• Recoverable via restore_backup tool
-• EXECUTES IMMEDIATELY - no confirmation dialog`,
-    {
-        path: z.string().describe('File path (Windows or Linux style)')
-    },
-    async ({ path: inputPath }) => {
-        try {
-            const result = await bridge.deleteFile(inputPath);
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify(result)
-                }]
-            };
-        } catch (e) {
-            // Fallback to local
-            const filePath = resolveSafePath(inputPath);
-            if (!fs.existsSync(filePath)) {
-                throw new Error(`File not found: ${inputPath}`);
-            }
-            const backupPath = backupFile(filePath);
-            fs.unlinkSync(filePath);
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({ status: 'success', action: 'deleted', file: inputPath, backup: backupPath })
-                }]
-            };
-        }
-    }
-);
-
-// =============================================================================
-// CATEGORY 5: Smart Patching - EXECUTE IMMEDIATELY
-// =============================================================================
-
-server.tool(
-    'simple_replace',
-    `[IMMEDIATE EXECUTION] Find and replace text in file - lighter than Cursor's StrReplace.
-• Automatic backup before change
-• Option to replace all occurrences or just first
-• Reports number of replacements made
-• Better for simple text substitutions without line tracking
-• Use Cursor's StrReplace for complex multi-line changes`,
-    {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        find: z.string().describe('Exact text to find'),
-        replace_with: z.string().describe('Replacement text'),
-        all: z.boolean().optional().describe('Replace all occurrences (default: true)')
-    },
-    async ({ path: inputPath, find, replace_with, all = true }) => {
-        const filePath = resolveSafePath(inputPath);
-        
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`File not found: ${inputPath}`);
-        }
-        
-        const original = fs.readFileSync(filePath, 'utf-8');
-        const backupPath = backupFile(filePath);
-        
-        let content, count;
-        if (all) {
-            const escaped = find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(escaped, 'g');
-            count = (original.match(regex) || []).length;
-            content = original.split(find).join(replace_with);
-        } else {
-            count = original.includes(find) ? 1 : 0;
-            content = original.replace(find, replace_with);
-        }
-        
-        if (count === 0) {
-            return { content: [{ type: 'text', text: JSON.stringify({ status: 'no_change', reason: 'Text not found' }) }] };
-        }
-        
-        fs.writeFileSync(filePath, content, 'utf-8');
-        
-        return {
-            content: [{
-                type: 'text',
-                text: JSON.stringify({ status: 'success', action: 'replaced', file: inputPath, occurrences: count, backup: backupPath })
-            }]
-        };
-    }
-);
 
 server.tool(
     'replace_exact_line',
@@ -1462,29 +1166,16 @@ server.tool(
 // =============================================================================
 
 server.tool(
-    'run_terminal',
-    `[⚠️ ISOLATED DOCKER SANDBOX] Execute command in isolated Linux container.
+    'run_sandbox_terminal',
+    `[SANDBOX] Execute commands in isolated Linux Docker container.
 
-🔒 ISOLATION: Runs inside Docker container - NOT connected to user's machine!
-• Cannot access Windows filesystem outside /workspace mount
-• Cannot install software on user's machine
-• Cannot run Windows commands (cmd, powershell)
-• All changes are contained within Docker container
+This is a SANDBOXED environment for safe testing. Use for:
+• Running test scripts safely
+• Trying npm/pip packages without affecting host
+• Build/lint tools in isolation
+• Git operations in sandbox
 
-✅ GOOD FOR:
-• Running linters, formatters, build tools on project files
-• Git operations within /workspace
-• npm/pip install within the project
-• Testing scripts in controlled environment
-• File operations within /workspace
-
-❌ NOT FOR:
-• Installing system-wide software (use Cursor's Shell instead)
-• Running Windows commands
-• Accessing user's full system
-• Long-running servers (container may restart)
-
-💡 FOR REAL TERMINAL: Use Cursor's built-in Shell tool instead!`,
+For REAL terminal access, use Cursor's built-in Shell tool instead.`,
     {
         command: z.string().describe('Linux/bash command to execute'),
         cwd: z.string().optional().describe('Working directory within /workspace')
@@ -1549,15 +1240,15 @@ server.tool(
     'batch_smart_apply',
     `[IMMEDIATE BATCH] Execute multiple file operations in sequence.
 • All operations backed up before execution
-• Supports: create, delete, replace, insert, append, prepend, diff, AST replace
+• Supports: replace, insert, append, prepend, diff, AST replace
 • Great for multi-file refactoring in one call
 • Faster than individual tool calls
-• Returns detailed status for each operation`,
+• Returns detailed status for each operation
+NOTE: For create/delete files, use Cursor's Write/Delete tools`,
     {
         operations: z.array(z.object({
             type: z.enum([
-                'create_file', 'delete_file',
-                'simple_replace', 'replace_exact_line',
+                'replace_exact_line',
                 'insert_at_line', 'append_to_file', 'prepend_to_file',
                 'insert_relative_to_marker', 'between_markers',
                 'line_range', 'diff', 'ast_replace_element'
@@ -1576,38 +1267,6 @@ server.tool(
                 const filePath = resolveSafePath(op.file);
                 
                 switch (op.type) {
-                    case 'create_file': {
-                        const dir = path.dirname(filePath);
-                        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-                        const backup = backupFile(filePath);
-                        if (backup) backups.push(backup);
-                        fs.writeFileSync(filePath, op.content || '', 'utf-8');
-                        results.push({ type: op.type, file: op.file, status: 'done' });
-                        break;
-                    }
-                    
-                    case 'delete_file': {
-                        if (fs.existsSync(filePath)) {
-                            const backup = backupFile(filePath);
-                            if (backup) backups.push(backup);
-                            fs.unlinkSync(filePath);
-                        }
-                        results.push({ type: op.type, file: op.file, status: 'done' });
-                        break;
-                    }
-                    
-                    case 'simple_replace': {
-                        if (fs.existsSync(filePath)) {
-                            const backup = backupFile(filePath);
-                            if (backup) backups.push(backup);
-                            let content = fs.readFileSync(filePath, 'utf-8');
-                            content = content.split(op.params.find).join(op.params.replace_with);
-                            fs.writeFileSync(filePath, content, 'utf-8');
-                        }
-                        results.push({ type: op.type, file: op.file, status: 'done' });
-                        break;
-                    }
-                    
                     case 'replace_exact_line': {
                         if (fs.existsSync(filePath)) {
                             const backup = backupFile(filePath);
