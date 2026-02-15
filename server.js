@@ -474,52 +474,140 @@ NOTE: For basic text search, use Cursor's built-in Grep tool`,
     },
     async ({ term = '', path: searchPath = '.', mode = 'smart', regex = false, case_sensitive = false, max_results = 50 }) => {
         const targetPath = resolveSafePath(searchPath);
-        const engine = new SearchEngine({ maxResults: max_results });
+        
+        // Helper to run ripgrep via Bridge or locally
+        const runRipgrep = async (args) => {
+            const command = `rg ${args}`;
+            if (USE_BRIDGE) {
+                const result = await callBridge('run_command', { command, cwd: targetPath });
+                return result.stdout || '';
+            } else {
+                // Local Docker execution
+                try {
+                    return execSync(command, { 
+                        cwd: targetPath, 
+                        encoding: 'utf-8',
+                        maxBuffer: 10 * 1024 * 1024 
+                    });
+                } catch (e) {
+                    return e.stdout || '';
+                }
+            }
+        };
+        
+        // Parse ripgrep output
+        const parseRgOutput = (output, includeContext = false) => {
+            const results = [];
+            const lines = output.split('\n').filter(l => l.trim());
+            
+            for (const line of lines) {
+                const match = line.match(/^([^:]+):(\d+):(.*)$/);
+                if (match) {
+                    results.push({
+                        file: match[1],
+                        line: parseInt(match[2]),
+                        content: match[3]
+                    });
+                    if (results.length >= max_results) break;
+                }
+            }
+            return results;
+        };
         
         let results;
+        const caseFlag = case_sensitive ? '' : '-i';
+        const regexFlag = regex ? '' : '-F';
+        const excludes = '--glob "!node_modules" --glob "!.git" --glob "!dist" --glob "!build"';
         
         switch (mode) {
             case 'definitions':
-                results = await engine.findDefinitions(targetPath, term, { maxResults: max_results });
+                // Search for definition patterns
+                const defPatterns = [
+                    `function\\s+${term}`, `class\\s+${term}`, `const\\s+${term}\\s*=`,
+                    `let\\s+${term}\\s*=`, `var\\s+${term}\\s*=`, `def\\s+${term}`,
+                    `async\\s+function\\s+${term}`, `${term}\\s*=\\s*function`
+                ];
+                const defOutput = await runRipgrep(`-n ${excludes} -e "${defPatterns.join('" -e "')}" .`);
+                results = parseRgOutput(defOutput).map(r => ({ ...r, type: 'definition' }));
                 break;
+                
             case 'usages':
-                results = await engine.findUsages(targetPath, term, { maxResults: max_results });
+                // Find usages (excluding definitions)
+                const usageOutput = await runRipgrep(`-n ${caseFlag} ${excludes} "${term}" .`);
+                const allUsages = parseRgOutput(usageOutput);
+                // Filter out likely definitions
+                results = allUsages.filter(r => {
+                    const line = r.content;
+                    return !line.match(new RegExp(`(function|class|const|let|var|def|async)\\s+${term}`));
+                }).map(r => ({ ...r, type: 'usage' }));
                 break;
+                
             case 'imports':
-                results = await engine.findImports(targetPath, term, { maxResults: max_results });
+                // Find import statements
+                const importPatterns = [
+                    `import.*${term}`, `from\\s+['"].*${term}`, 
+                    `require\\(['"].*${term}`, `from\\s+${term}\\s+import`
+                ];
+                const importOutput = await runRipgrep(`-n ${excludes} -e "${importPatterns.join('" -e "')}" .`);
+                results = parseRgOutput(importOutput).map(r => ({ ...r, type: 'import' }));
                 break;
+                
             case 'todos':
-                results = await engine.findTodos(targetPath, { maxResults: max_results });
+                // Find TODO/FIXME comments
+                const todoOutput = await runRipgrep(`-n ${excludes} -e "TODO" -e "FIXME" -e "HACK" -e "XXX" .`);
+                results = parseRgOutput(todoOutput).map(r => ({ ...r, type: 'todo' }));
                 break;
+                
             case 'secrets':
-                results = await engine.findPotentialSecrets(targetPath, { maxResults: max_results });
+                // Find potential secrets
+                const secretPatterns = [
+                    'password\\s*=', 'api_key\\s*=', 'secret\\s*=', 
+                    'token\\s*=', 'apikey', 'API_KEY', 'SECRET_KEY'
+                ];
+                const secretOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -e "${secretPatterns.join('" -e "')}" .`);
+                results = parseRgOutput(secretOutput).map(r => ({ ...r, type: 'potential_secret' }));
                 break;
+                
             case 'count':
-                results = await engine.countMatches(targetPath, term, {
-                    caseSensitive: case_sensitive,
-                    regex
+                const countOutput = await runRipgrep(`-c ${caseFlag} ${regexFlag} ${excludes} "${term}" .`);
+                let totalCount = 0;
+                countOutput.split('\n').forEach(line => {
+                    const match = line.match(/:(\d+)$/);
+                    if (match) totalCount += parseInt(match[1]);
                 });
-                // countMatches returns a number or object, wrap it
                 return {
                     content: [{
                         type: 'text',
-                        text: JSON.stringify({ term, mode, count: results }, null, 2)
+                        text: JSON.stringify({ term, mode, count: totalCount }, null, 2)
                     }]
                 };
+                
             case 'files':
-                results = await engine.searchFiles(targetPath, term, {
-                    caseSensitive: case_sensitive,
-                    regex,
-                    maxResults: max_results
-                });
+                const filesOutput = await runRipgrep(`-l ${caseFlag} ${regexFlag} ${excludes} "${term}" .`);
+                results = filesOutput.split('\n').filter(l => l.trim()).slice(0, max_results).map(f => ({ file: f }));
                 break;
+                
             case 'smart':
             default:
-                results = await engine.smartSearch(targetPath, term, {
-                    regex,
-                    caseSensitive: case_sensitive,
-                    maxResults: max_results,
-                    classifyResults: true
+                // Smart search with AST classification
+                const smartOutput = await runRipgrep(`-n ${caseFlag} ${regexFlag} ${excludes} "${term}" .`);
+                const matches = parseRgOutput(smartOutput);
+                
+                // Classify each match
+                results = matches.map(r => {
+                    let resultType = 'reference';
+                    const line = r.content;
+                    
+                    // Check if it's a definition
+                    if (line.match(new RegExp(`(function|class|const|let|var|def|async\\s+function)\\s+${term}`))) {
+                        resultType = 'definition';
+                    } else if (line.match(new RegExp(`(import|require|from).*${term}`))) {
+                        resultType = 'import';
+                    } else if (line.match(new RegExp(`${term}\\s*\\(`))) {
+                        resultType = 'call';
+                    }
+                    
+                    return { ...r, type: resultType };
                 });
         }
         
@@ -555,19 +643,52 @@ server.tool(
     },
     async ({ element_name, path: searchPath = '.' }) => {
         const targetPath = resolveSafePath(searchPath);
-        const engine = new SearchEngine({ maxResults: 100 });
+        const excludes = '--glob "!node_modules" --glob "!.git" --glob "!dist" --glob "!build"';
         
-        // Use smart search to find and classify
-        const results = await engine.smartSearch(targetPath, element_name, {
-            classifyResults: true,
-            wholeWord: true,
-            groupByType: true
+        // Run ripgrep via Bridge or locally
+        const runRipgrep = async (args) => {
+            const command = `rg ${args}`;
+            if (USE_BRIDGE) {
+                const result = await callBridge('run_command', { command, cwd: targetPath });
+                return result.stdout || '';
+            } else {
+                try {
+                    return execSync(command, { cwd: targetPath, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+                } catch (e) {
+                    return e.stdout || '';
+                }
+            }
+        };
+        
+        // Search for all occurrences
+        const output = await runRipgrep(`-n -w ${excludes} "${element_name}" .`);
+        
+        // Group by type
+        const grouped = { definitions: [], imports: [], calls: [], references: [] };
+        
+        output.split('\n').filter(l => l.trim()).forEach(line => {
+            const match = line.match(/^([^:]+):(\d+):(.*)$/);
+            if (match) {
+                const result = { file: match[1], line: parseInt(match[2]), content: match[3].trim() };
+                const content = result.content;
+                
+                // Classify
+                if (content.match(new RegExp(`(function|class|const|let|var|def|async\\s+function)\\s+${element_name}`))) {
+                    grouped.definitions.push(result);
+                } else if (content.match(new RegExp(`(import|require|from).*${element_name}`))) {
+                    grouped.imports.push(result);
+                } else if (content.match(new RegExp(`${element_name}\\s*\\(`))) {
+                    grouped.calls.push(result);
+                } else {
+                    grouped.references.push(result);
+                }
+            }
         });
         
         return {
             content: [{
                 type: 'text',
-                text: JSON.stringify({ element: element_name, results }, null, 2)
+                text: JSON.stringify({ element: element_name, ...grouped }, null, 2)
             }]
         };
     }
@@ -1177,9 +1298,58 @@ server.tool(
     },
     async ({ path: searchPath = '.', min_lines = 500 }) => {
         const targetPath = resolveSafePath(searchPath);
-        const engine = new SearchEngine();
+        const results = [];
         
-        const results = await engine.findLargeFiles(targetPath, min_lines);
+        // Use Bridge to list files recursively
+        const walkDir = async (dir, depth = 0) => {
+            if (depth > 5) return; // Limit depth
+            
+            try {
+                const structure = await callBridge('list_dir', { path: dir, max_depth: 1 });
+                
+                const processNode = async (node, parentPath) => {
+                    const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+                    
+                    if (node.type === 'directory' && node.children) {
+                        for (const child of node.children) {
+                            await processNode(child, fullPath);
+                        }
+                    } else if (node.type === 'file') {
+                        // Check if it's a code file
+                        const ext = path.extname(node.name).toLowerCase();
+                        if (['.js', '.ts', '.py', '.java', '.go', '.jsx', '.tsx', '.vue', '.rb', '.php', '.cs'].includes(ext)) {
+                            try {
+                                const content = await bridge.readFile(`${dir}/${node.name}`);
+                                const lineCount = content.split('\n').length;
+                                if (lineCount >= min_lines) {
+                                    results.push({
+                                        file: `${dir}/${node.name}`.replace(targetPath + '/', ''),
+                                        lines: lineCount
+                                    });
+                                }
+                            } catch (e) {
+                                // Ignore unreadable files
+                            }
+                        }
+                    }
+                };
+                
+                if (structure && structure.children) {
+                    for (const child of structure.children) {
+                        if (child.type === 'directory') {
+                            await walkDir(`${dir}/${child.name}`, depth + 1);
+                        } else {
+                            await processNode(child, '');
+                        }
+                    }
+                }
+            } catch (e) {
+                // Ignore permission errors
+            }
+        };
+        
+        await walkDir(targetPath);
+        results.sort((a, b) => b.lines - a.lines);
         
         return {
             content: [{
