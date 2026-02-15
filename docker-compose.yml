@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  code-contractor-mcp:
+    build: .
+    image: code-contractor-mcp:latest
+    container_name: code-contractor-mcp
+    stdin_open: true
+    tty: true
+    volumes:
+      # Mount your workspace - CHANGE THIS to your project path
+      # Example (Windows): - C:/Users/me/projects:/workspace
+      # Example (macOS/Linux): - /home/me/projects:/workspace
+      - ${WORKSPACE_PATH:-./workspace}:/workspace
+    environment:
+      - MCP_WORKSPACE=/workspace
+      - BACKUP=true
+      - MAX_LINES=3000
+    # MCP uses stdio - this keeps the container running
+    command: ["node", "server.js"]
