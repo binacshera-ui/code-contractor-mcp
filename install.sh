@@ -37,7 +37,7 @@ cd "$INSTALL_DIR"
 echo "Working in: $INSTALL_DIR"
 
 # Download files from GitHub
-REPO_URL="https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main"
+REPO_URL="https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/mcp-server"
 echo ""
 echo "Downloading files..."
 
