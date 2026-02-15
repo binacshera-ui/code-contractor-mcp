@@ -48,7 +48,13 @@ const CodeLinter = require('./CodeLinter');
 const BRIDGE_HOST = process.env.BRIDGE_HOST || 'host.docker.internal';
 const BRIDGE_PORT = process.env.BRIDGE_PORT || 9111;
 const BRIDGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}`;
-const USE_BRIDGE = process.env.USE_BRIDGE !== 'false';
+
+// Check if /host mount exists (Linux full filesystem mount)
+// This MUST be checked early, before USE_BRIDGE decision
+const HOST_MOUNT_EXISTS = fs.existsSync('/host');
+
+// USE_BRIDGE is disabled when we have HOST_MOUNT (direct filesystem access)
+const USE_BRIDGE = !HOST_MOUNT_EXISTS && process.env.USE_BRIDGE !== 'false';
 
 const WORKSPACE_ROOT = process.env.MCP_WORKSPACE || '/workspace';
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || '3000000'); // 3MB
@@ -216,34 +222,51 @@ function resolveSafePath(inputPath) {
     // Handle Windows paths: C:\path or C:/path -> just the path part
     const windowsPathMatch = normalizedPath.match(/^([a-zA-Z]):\/(.*)$/);
     if (windowsPathMatch) {
+        // Windows path like C:/Users/... -> /Users/...
         normalizedPath = '/' + windowsPathMatch[2];
     }
     
-    // Handle /workspace prefix (Docker mount)
+    // Handle /workspace prefix (legacy Docker mount)
     if (normalizedPath.startsWith('/workspace/')) {
         normalizedPath = normalizedPath.substring('/workspace'.length);
     } else if (normalizedPath === '/workspace') {
         normalizedPath = '/';
     }
     
-    // IMPORTANT: For absolute Linux paths (like /root/..., /home/..., /var/...)
-    // When using Bridge, these should be passed as-is to the Bridge
-    // The Bridge runs on the host and can access these paths directly
-    if (normalizedPath.startsWith('/') && USE_BRIDGE) {
-        // Return absolute path as-is for Bridge to handle
+    // Remove /host prefix if user accidentally includes it
+    if (normalizedPath.startsWith('/host/')) {
+        normalizedPath = normalizedPath.substring('/host'.length);
+    }
+    
+    // MODE 1: Host mount exists (Linux with -v /:/host)
+    // Docker has direct access to entire filesystem via /host
+    if (HOST_MOUNT_EXISTS) {
+        // Ensure path starts with /
+        if (!normalizedPath.startsWith('/')) {
+            normalizedPath = '/' + normalizedPath;
+        }
+        // Return path under /host
+        return '/host' + normalizedPath;
+    }
+    
+    // MODE 2: Bridge mode (Windows or without host mount)
+    // Pass absolute paths to Bridge
+    if (USE_BRIDGE) {
+        if (!normalizedPath.startsWith('/')) {
+            normalizedPath = '/' + normalizedPath;
+        }
         return normalizedPath;
     }
     
-    // For Docker-only mode or relative paths, resolve against WORKSPACE_ROOT
+    // MODE 3: Docker-only with workspace mount (legacy)
     if (!normalizedPath.startsWith('/')) {
         normalizedPath = '/' + normalizedPath;
     }
     
     const resolved = path.resolve(WORKSPACE_ROOT, normalizedPath);
     
-    // In Docker-only mode (no Bridge), enforce workspace boundary
-    if (!USE_BRIDGE && !resolved.startsWith(WORKSPACE_ROOT)) {
-        throw new Error(`Security: Path '${inputPath}' is outside workspace. Use Bridge for full filesystem access.`);
+    if (!resolved.startsWith(WORKSPACE_ROOT)) {
+        throw new Error(`Security: Path '${inputPath}' is outside workspace.`);
     }
     
     return resolved;
@@ -1299,47 +1322,49 @@ server.tool(
     async ({ path: searchPath = '.', min_lines = 500 }) => {
         const targetPath = resolveSafePath(searchPath);
         const results = [];
+        const codeExtensions = ['.js', '.ts', '.py', '.java', '.go', '.jsx', '.tsx', '.vue', '.rb', '.php', '.cs'];
+        const ignoreDirs = ['.git', 'node_modules', 'dist', 'build', '__pycache__', '.mcp-backups'];
         
-        // Use Bridge to list files recursively
+        // Recursive directory walker - works with both direct fs and Bridge
         const walkDir = async (dir, depth = 0) => {
-            if (depth > 5) return; // Limit depth
+            if (depth > 5) return;
             
             try {
-                const structure = await callBridge('list_dir', { path: dir, max_depth: 1 });
+                let entries;
                 
-                const processNode = async (node, parentPath) => {
-                    const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+                if (USE_BRIDGE) {
+                    // Bridge mode - use API
+                    const structure = await callBridge('list_dir', { path: dir, max_depth: 1 });
+                    if (!structure || !structure.children) return;
+                    entries = structure.children.map(c => ({ name: c.name, isDir: c.type === 'directory' }));
+                } else {
+                    // Direct fs mode (HOST_MOUNT or local)
+                    entries = fs.readdirSync(dir, { withFileTypes: true })
+                        .map(e => ({ name: e.name, isDir: e.isDirectory() }));
+                }
+                
+                for (const entry of entries) {
+                    const fullPath = path.join(dir, entry.name);
                     
-                    if (node.type === 'directory' && node.children) {
-                        for (const child of node.children) {
-                            await processNode(child, fullPath);
+                    if (entry.isDir) {
+                        if (!ignoreDirs.includes(entry.name)) {
+                            await walkDir(fullPath, depth + 1);
                         }
-                    } else if (node.type === 'file') {
-                        // Check if it's a code file
-                        const ext = path.extname(node.name).toLowerCase();
-                        if (['.js', '.ts', '.py', '.java', '.go', '.jsx', '.tsx', '.vue', '.rb', '.php', '.cs'].includes(ext)) {
+                    } else {
+                        const ext = path.extname(entry.name).toLowerCase();
+                        if (codeExtensions.includes(ext)) {
                             try {
-                                const content = await bridge.readFile(`${dir}/${node.name}`);
+                                const content = await bridge.readFile(fullPath);
                                 const lineCount = content.split('\n').length;
                                 if (lineCount >= min_lines) {
                                     results.push({
-                                        file: `${dir}/${node.name}`.replace(targetPath + '/', ''),
+                                        file: fullPath.replace(targetPath + '/', '').replace(targetPath + path.sep, ''),
                                         lines: lineCount
                                     });
                                 }
                             } catch (e) {
                                 // Ignore unreadable files
                             }
-                        }
-                    }
-                };
-                
-                if (structure && structure.children) {
-                    for (const child of structure.children) {
-                        if (child.type === 'directory') {
-                            await walkDir(`${dir}/${child.name}`, depth + 1);
-                        } else {
-                            await processNode(child, '');
                         }
                     }
                 }
