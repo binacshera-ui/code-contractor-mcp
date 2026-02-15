@@ -798,7 +798,8 @@ server.tool(
                     type: 'text',
                     text: JSON.stringify({ status: 'success', action: 'deleted', file: inputPath, backup: backupPath })
                 }]
-        };
+            };
+        }
     }
 );
 
