@@ -73,7 +73,7 @@ Code Contractor is a powerful [Model Context Protocol (MCP)](https://modelcontex
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/code-contractor-mcp.git
+git clone https://github.com/binacshera-ui/code-contractor-mcp.git
 cd code-contractor-mcp
 
 # Run the installer
@@ -92,7 +92,7 @@ The installer will:
 
 ```bash
 # 1. Clone and build
-git clone https://github.com/YOUR_USERNAME/code-contractor-mcp.git
+git clone https://github.com/binacshera-ui/code-contractor-mcp.git
 cd code-contractor-mcp
 docker build -t code-contractor-mcp .
 npm install
