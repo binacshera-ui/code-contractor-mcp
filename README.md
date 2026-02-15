@@ -164,8 +164,18 @@ The installer sets up auto-start on login, but you can also start manually.
 
 | Tool | Description |
 |------|-------------|
-| `search_code` | High-performance ripgrep search with modes (fast/smart/definitions/usages) |
+| `search_code` | High-performance ripgrep search with modes: |
+|  | • `fast` - Pure ripgrep text search |
+|  | • `smart` - ripgrep + AST classification |
+|  | • `definitions` - Find only declarations |
+|  | • `usages` - Find only references |
+|  | • `imports` - Find import statements |
+|  | • `todos` - Find TODO/FIXME/HACK comments |
+|  | • `secrets` - Find potential hardcoded secrets |
+|  | • `count` - Count matches only |
+|  | • `files` - List files with matches |
 | `find_references` | Find all usages of a symbol across project |
+| `find_large_files` | Find files exceeding line threshold |
 | `lint_file` | Multi-layer code analysis (AST + linters) |
 | `lint_code` | Lint raw code string without file |
 
@@ -184,7 +194,14 @@ The installer sets up auto-start on login, but you can also start manually.
 | `append_to_file` | Add content to end of file |
 | `prepend_to_file` | Add content to start of file |
 | `apply_diff` | Apply unified diff patch |
+
+### AST Operations (Refactoring)
+
+| Tool | Description |
+|------|-------------|
 | `ast_replace_element` | Replace function/class by name (AST-powered) |
+| `ast_rename_symbol` | Rename variable/function/class throughout file |
+| `ast_add_import` | Add import statement at correct location |
 
 ### Backup & Recovery
 
