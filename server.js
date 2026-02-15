@@ -305,10 +305,11 @@ const server = new McpServer({
 server.tool(
     'get_file_outline',
     `[AST-POWERED] Get function/class definitions in file (X-ray view).
-• Uses Tree-sitter AST for accurate parsing (JS/TS/Python/Go/Java)
-• Returns: name, type, line number, signature
-• Perfect for understanding file structure before targeted edits
-• Fallback to regex for unsupported languages`,
+⭐ PRIORITY 1 FOR READING - Use FIRST before reading any file!
+• Returns ONLY structure (names, types, line numbers) - saves 90%+ tokens
+• Use this to find what you need, then extract_code_element for details
+• Much better than Cursor's Read which returns entire file content
+• Languages: JS/TS/Python/Go/Java (regex fallback for others)`,
     {
         path: z.string().describe('File path (Windows or Linux style)')
     },
@@ -399,10 +400,10 @@ server.tool(
 server.tool(
     'extract_code_element',
     `[AST-POWERED] Extract specific function/class/variable with surrounding context.
-• Uses Tree-sitter AST to find exact element boundaries
-• Includes configurable context lines before/after
-• Supports: function, class, variable declarations
-• Better than line-based search - understands code structure
+⭐ PRIORITY 2 FOR READING - Use after get_file_outline to read specific code
+• Returns ONLY the requested element - not entire file!
+• Typical workflow: get_file_outline → find function → extract_code_element
+• Saves 80%+ tokens compared to reading full file
 • Languages: JavaScript, TypeScript, Python, Go, Java`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
@@ -592,15 +593,24 @@ server.tool(
 
 // =============================================================================
 // CATEGORY 4: Smart Patching - EXECUTE IMMEDIATELY
+// Priority order for TOKEN EFFICIENCY:
+// 1. ast_replace_element - just function name + new code
+// 2. ast_add_import - just module name
+// 3. insert_at_line / append / prepend - just new code
+// 4. insert_relative_to_marker - short marker + new code
+// 5. replace_between_markers - two markers + new code
+// 6. replace_exact_line - risky, needs exact match
+// 7. replace_line_range - risky if lines shift
+// 8. apply_diff - needs context (more tokens)
+// 9. Cursor StrReplace - AVOID! needs old+new (2x tokens)
 // =============================================================================
 
 server.tool(
     'replace_exact_line',
-    `[IMMEDIATE EXECUTION] Replace a line that matches exactly (including whitespace).
-• Strict matching - must match entire line exactly
-• Good for single-line configuration changes
-• Automatic backup before change
-• Throws error if line not found (safe)`,
+    `⚠️ PRIORITY 6 - Use only for single config line changes
+• Risky: must match entire line exactly (whitespace matters!)
+• Consider: insert_at_line or ast_replace_element instead
+• Automatic backup before change`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         line_to_find: z.string().describe('Complete line to find (exact match required)'),
@@ -645,11 +655,11 @@ server.tool(
 
 server.tool(
     'insert_at_line',
-    `[IMMEDIATE EXECUTION] Insert content at specific line number.
-• Line numbers are 1-based (first line = 1)
-• Content inserted BEFORE the specified line
-• Automatic backup before change
-• Use for adding imports, new functions at specific locations`,
+    `⭐ PRIORITY 3 FOR WRITING - Insert new code at line number
+• Only sends NEW code - no old code needed = saves tokens!
+• Get line number from get_file_outline first
+• Perfect for: adding imports, new functions, new methods
+• Use append_to_file for adding at end (even simpler)`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         line_number: z.number().describe('Line number where content will be inserted (1-based)'),
@@ -682,11 +692,11 @@ server.tool(
 
 server.tool(
     'replace_line_range',
-    `[IMMEDIATE EXECUTION] Replace a range of lines with new content.
-• Line numbers are 1-based and inclusive
-• Removes lines from start to end, inserts new content
-• Perfect for replacing entire functions/blocks by line range
-• Combine with get_file_outline to find line ranges`,
+    `⚠️ PRIORITY 7 - Risky if file was modified (lines shift!)
+• Better alternative: ast_replace_element (finds by name, not line)
+• Only use when you JUST read the file and lines are fresh
+• Get line numbers from get_file_outline
+• Sends only NEW code (good), but line numbers may be stale (bad)`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         start_line: z.number().describe('First line to replace (1-based, inclusive)'),
@@ -724,11 +734,11 @@ server.tool(
 
 server.tool(
     'insert_relative_to_marker',
-    `[IMMEDIATE EXECUTION] Insert content before or after a marker text.
-• Finds first occurrence of marker string
-• Inserts content immediately before/after marker
-• Good for adding code near specific patterns
-• Example: Insert after "// IMPORTS" comment`,
+    `⭐ PRIORITY 4 FOR WRITING - Insert near a unique text marker
+• Finds marker (e.g., function signature) and inserts before/after
+• Only sends: short marker + new code = efficient!
+• Great for: adding code after specific function, after imports
+• Marker should be unique - first occurrence is used`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         marker: z.string().describe('Text pattern to find as anchor point'),
@@ -771,11 +781,11 @@ server.tool(
 
 server.tool(
     'replace_between_markers',
-    `[IMMEDIATE EXECUTION] Replace content between two marker texts.
-• Finds first occurrence of start_marker, then end_marker
-• Replaces everything between them (exclusive by default)
-• include_markers=true also replaces the markers themselves
-• Great for template sections with delimiters`,
+    `⭐ PRIORITY 5 - Replace content between two unique markers
+• Use when you have clear delimiters (e.g., /* START */ ... /* END */)
+• Sends: two short markers + new code = efficient!
+• Alternative to ast_replace_element when no function boundary
+• Markers should be unique in the file`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         start_marker: z.string().describe('Opening delimiter text'),
@@ -821,11 +831,11 @@ server.tool(
 
 server.tool(
     'append_to_file',
-    `[IMMEDIATE EXECUTION] Append content to end of file.
-• Adds content at the very end of file
-• Creates file if doesn't exist
-• Automatic backup for existing files
-• Use for adding new functions, exports at file end`,
+    `⭐ PRIORITY 3 FOR WRITING - Add code to END of file
+• SIMPLEST tool - just sends new code, no search needed!
+• Perfect for: new functions, new exports, adding at bottom
+• No line numbers, no markers, no old code = minimal tokens
+• Automatic backup`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         content: z.string().describe('Content to add at end of file')
@@ -847,11 +857,11 @@ server.tool(
 
 server.tool(
     'prepend_to_file',
-    `[IMMEDIATE EXECUTION] Prepend content to start of file.
-• Adds content at the very beginning of file
-• Creates file if doesn't exist
-• Automatic backup for existing files
-• Use for adding imports, file headers, licenses`,
+    `⭐ PRIORITY 3 FOR WRITING - Add code to START of file
+• SIMPLEST tool - just sends new code!
+• Perfect for: imports, headers, license text
+• Consider ast_add_import for smarter import handling
+• Automatic backup`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         content: z.string().describe('Content to add at start of file')
@@ -875,11 +885,11 @@ server.tool(
 
 server.tool(
     'apply_diff',
-    `[IMMEDIATE EXECUTION] Apply unified diff patch to file.
-• Accepts standard unified diff format
-• Validates patch can be applied cleanly
-• Automatic backup before applying
-• Fails safely if content has changed`,
+    `⚠️ PRIORITY 8 - Diff requires context lines = more tokens
+• Better alternatives: ast_replace_element, insert_at_line
+• Use only when you already have a diff from somewhere
+• Needs: old lines + new lines + context = high token cost
+• Fails if file changed since diff was created`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         diff_content: z.string().describe('Unified diff content (with --- +++ @@ headers)')
@@ -925,12 +935,12 @@ server.tool(
 
 server.tool(
     'ast_replace_element',
-    `[AST-POWERED IMMEDIATE] Replace function/class by name - no need to know exact current content.
-• Finds element using Tree-sitter AST (not text matching)
-• Replaces entire function/class with new implementation
-• Perfect for refactoring when you don't know current code exactly
-• Languages: JavaScript, TypeScript, Python, Go, Java
-• Much safer than text-based replacement`,
+    `🏆 PRIORITY 1 FOR WRITING - Replace function/class by NAME
+• BEST tool for modifying existing code!
+• Just send: function name + new implementation
+• No old code needed, no line numbers, no markers!
+• AST finds the function automatically = safest method
+• Languages: JavaScript, TypeScript, Python, Go, Java`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         element_name: z.string().describe('Name of function or class to replace'),
@@ -975,11 +985,11 @@ server.tool(
 
 server.tool(
     'ast_rename_symbol',
-    `[AST-POWERED] Rename a variable, function, or class throughout a file.
-• Finds all occurrences using AST (not text replace)
-• Handles scope correctly - won't rename unrelated symbols
-• Languages: JavaScript, TypeScript, Python, Go, Java
-• Safe refactoring without breaking code`,
+    `🏆 PRIORITY 1 FOR RENAMING - Rename symbol throughout file
+• MINIMAL tokens: just old name + new name!
+• Finds ALL occurrences automatically
+• Much safer than Cursor StrReplace (won't break strings/comments)
+• Languages: JavaScript, TypeScript, Python, Go, Java`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         old_name: z.string().describe('Current name of the symbol'),
@@ -1033,10 +1043,10 @@ server.tool(
 
 server.tool(
     'ast_add_import',
-    `[AST-POWERED] Add an import statement to a file.
-• Adds import at the correct location (top of file, after existing imports)
-• Handles different import styles (ES6, CommonJS, Python)
-• Won't add duplicate imports
+    `🏆 PRIORITY 2 FOR IMPORTS - Add import statement smartly
+• MINIMAL tokens: just module name + what to import!
+• Automatically places at correct location
+• Won't add duplicates
 • Languages: JavaScript, TypeScript, Python`,
     {
         path: z.string().describe('File path (Windows or Linux style)'),
