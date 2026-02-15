@@ -1,64 +1,78 @@
 #!/bin/bash
+#
+# Code Contractor MCP Server - One-Line Installer
+# Usage: curl -fsSL https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/install.sh | bash
+#
+
+set -e
 
 echo "=============================================="
 echo "  Code Contractor MCP Server - Installer"
 echo "=============================================="
 echo ""
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # Check Docker
-echo "Checking prerequisites..."
+echo "Checking Docker..."
 if ! command -v docker &> /dev/null; then
     echo -e "${RED}ERROR: Docker is not installed.${NC}"
-    echo "Please install Docker first:"
-    echo "  curl -fsSL https://get.docker.com | sh"
+    echo "Install Docker: curl -fsSL https://get.docker.com | sh"
     exit 1
 fi
 
-if ! docker info &> /dev/null; then
+if ! docker info &> /dev/null 2>&1; then
     echo -e "${RED}ERROR: Docker is not running.${NC}"
-    echo "Please start Docker and try again."
     exit 1
 fi
-echo -e "${GREEN}[OK]${NC} Docker is installed and running"
-echo ""
+echo -e "${GREEN}[OK]${NC} Docker is ready"
 
-# Get script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Create temp directory
+INSTALL_DIR=$(mktemp -d)
+cd "$INSTALL_DIR"
+echo "Working in: $INSTALL_DIR"
+
+# Download files from GitHub
+REPO_URL="https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main"
+echo ""
+echo "Downloading files..."
+
+curl -fsSL "$REPO_URL/Dockerfile" -o Dockerfile
+curl -fsSL "$REPO_URL/package.json" -o package.json
+curl -fsSL "$REPO_URL/server.js" -o server.js
+curl -fsSL "$REPO_URL/SearchEngine.js" -o SearchEngine.js
+curl -fsSL "$REPO_URL/CodeLinter.js" -o CodeLinter.js
+curl -fsSL "$REPO_URL/ASTParser.js" -o ASTParser.js
+
+echo -e "${GREEN}[OK]${NC} Files downloaded"
 
 # Build Docker image
+echo ""
 echo "Building Docker image (this may take a few minutes)..."
-cd "$SCRIPT_DIR"
-docker build -t code-contractor-mcp .
-if [ $? -ne 0 ]; then
-    echo -e "${RED}ERROR: Failed to build Docker image.${NC}"
-    exit 1
-fi
+docker build -t code-contractor-mcp . --quiet
 
-echo ""
-echo -e "${GREEN}[OK]${NC} Docker image built successfully"
-echo ""
+echo -e "${GREEN}[OK]${NC} Docker image built"
 
-# Config file location
+# Clean up temp directory
+cd /
+rm -rf "$INSTALL_DIR"
+
+# Configure Cursor
 CONFIG_DIR="$HOME/.cursor"
 CONFIG_FILE="$CONFIG_DIR/mcp.json"
-
-# Create config directory if needed
 mkdir -p "$CONFIG_DIR"
 
-# Backup existing config if exists
+# Backup existing config
 if [ -f "$CONFIG_FILE" ]; then
-    echo "Backing up existing config to mcp.json.backup"
     cp "$CONFIG_FILE" "$CONFIG_FILE.backup"
+    echo "Backed up existing config"
 fi
 
-# Create config - mount ENTIRE filesystem to Docker
-# This gives Docker direct access to ALL files!
+# Create config with full filesystem mount
 cat > "$CONFIG_FILE" << 'EOF'
 {
   "mcpServers": {
@@ -75,17 +89,9 @@ echo "=============================================="
 echo -e "  ${GREEN}Installation Complete!${NC}"
 echo "=============================================="
 echo ""
-echo "Configuration saved to: $CONFIG_FILE"
+echo "Config: $CONFIG_FILE"
 echo ""
-echo -e "${YELLOW}Architecture:${NC}"
-echo "  - Docker has DIRECT access to entire filesystem via /host mount"
-echo "  - All tools (ripgrep, tree-sitter, etc.) run INSIDE Docker"
-echo "  - No Bridge service needed!"
+echo -e "${YELLOW}Next step:${NC} Restart Cursor IDE"
 echo ""
-echo "Next steps:"
-echo "  1. Restart Cursor IDE"
-echo "  2. The MCP tools will be available automatically"
-echo ""
-echo "To verify Docker works:"
-echo '  docker run --rm code-contractor-mcp node -e "console.log('"'"'OK'"'"')"'
+echo "Verify: docker run --rm code-contractor-mcp node -e \"console.log('OK')\""
 echo ""
