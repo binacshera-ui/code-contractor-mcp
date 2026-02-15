@@ -9,7 +9,7 @@
 
 ## Overview
 
-Code Contractor is a powerful [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides AI assistants with advanced code manipulation capabilities. It runs in an **isolated Docker environment** for security and consistency.
+Code Contractor is a powerful [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides AI assistants with advanced code manipulation capabilities.
 
 ### Key Features
 
@@ -18,19 +18,58 @@ Code Contractor is a powerful [Model Context Protocol (MCP)](https://modelcontex
 - **🔧 Smart File Operations** - 10+ patching methods with automatic backups
 - **🛡️ Multi-Layer Linting** - AST + ESLint/flake8/pylint integration
 - **📦 Batch Operations** - Execute multiple operations atomically
-- **🔒 Isolated Sandbox** - All operations run in Docker container
+- **🌐 Bridge Architecture** - Works with local files AND remote SSH connections!
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Cursor IDE                                                      │
+│  (local or connected via Remote SSH)                            │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  MCP Server (Docker)                                             │
+│  • AST Parsing (Tree-sitter)                                     │
+│  • Code Search (ripgrep)                                         │
+│  • Linting                                                       │
+│  • Heavy processing                                              │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │ HTTP Request
+                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Bridge (runs on YOUR machine)                                   │
+│  • Read/Write files                                              │
+│  • Has YOUR permissions                                          │
+│  • Access to everything YOU can access                           │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  File System                                                     │
+│  • Local files                                                   │
+│  • Remote SSH files (when using Cursor Remote SSH)              │
+│  • Network mounts                                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why Bridge Architecture?**
+- Heavy processing (AST parsing, search, linting) runs in Docker for isolation
+- File operations run on YOUR machine with YOUR permissions
+- Works seamlessly with Cursor Remote SSH connections!
 
 ## Quick Start
 
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
-- [Node.js 20+](https://nodejs.org/) (for local development only)
+- [Node.js 20+](https://nodejs.org/) 
 - [Cursor IDE](https://cursor.sh/) or any MCP-compatible client
 
 ### Installation
 
-#### Option 1: One-Click Install (Recommended)
+#### One-Click Install (Recommended)
 
 ```bash
 # Clone the repository
@@ -42,49 +81,73 @@ cd code-contractor-mcp
 install.bat         # Windows
 ```
 
-#### Option 2: Manual Installation
+The installer will:
+1. Build the Docker image
+2. Install Node.js dependencies
+3. Configure Cursor's `mcp.json`
+4. Set up the Bridge to auto-start
+5. Start the Bridge
+
+#### Manual Installation
 
 ```bash
-# 1. Clone the repository
+# 1. Clone and build
 git clone https://github.com/YOUR_USERNAME/code-contractor-mcp.git
 cd code-contractor-mcp
-
-# 2. Build the Docker image
 docker build -t code-contractor-mcp .
+npm install
 
-# 3. Add to your MCP client configuration (see below)
+# 2. Start the bridge (keep running in background)
+node bridge.js
+
+# 3. Configure mcp.json (see below)
 ```
 
 ### Configuration
 
 Add to your MCP client configuration file (`~/.cursor/mcp.json` or `%USERPROFILE%\.cursor\mcp.json`):
 
-**Windows - Full Drive Access (Recommended):**
+**With Bridge (Recommended):**
 ```json
 {
   "mcpServers": {
     "code-contractor": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-v", "C:/:/workspace", "code-contractor-mcp"]
+      "args": ["run", "-i", "--rm", "--add-host=host.docker.internal:host-gateway", "code-contractor-mcp"]
     }
   }
 }
 ```
-This gives access to your entire C: drive. Example: `C:\projects\myapp` → `/workspace/projects/myapp`
 
-**macOS/Linux - Home Directory:**
+**macOS (host.docker.internal works natively):**
 ```json
 {
   "mcpServers": {
     "code-contractor": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-v", "/Users/yourname:/workspace", "code-contractor-mcp"]
+      "args": ["run", "-i", "--rm", "code-contractor-mcp"]
     }
   }
 }
 ```
 
-> **Tip**: The installer (`install.bat` / `install.sh`) will guide you through workspace configuration automatically.
+### Starting the Bridge
+
+The Bridge must be running for file operations to work.
+
+**Windows:**
+```batch
+start-bridge.bat
+```
+
+**macOS/Linux:**
+```bash
+./start-bridge.sh
+# Or in background:
+nohup node bridge.js > bridge.log 2>&1 &
+```
+
+The installer sets up auto-start on login, but you can also start manually.
 
 ## Tools Reference
 
@@ -101,175 +164,143 @@ This gives access to your entire C: drive. Example: `C:\projects\myapp` → `/wo
 
 | Tool | Description |
 |------|-------------|
-| `search_code` | High-performance search (ripgrep + AST classification) |
+| `search_code` | High-performance ripgrep search with modes (fast/smart/definitions/usages) |
 | `find_references` | Find all usages of a symbol across project |
-| `lint_file` | Multi-layer code analysis on file |
-| `lint_code` | Multi-layer code analysis on raw code string |
+| `lint_file` | Multi-layer code analysis (AST + linters) |
+| `lint_code` | Lint raw code string without file |
 
-### File Operations
+### File Operations (via Bridge)
 
 | Tool | Description |
 |------|-------------|
 | `create_file` | Create or overwrite file (with backup) |
 | `delete_file` | Delete file (with backup) |
 | `simple_replace` | Find and replace text |
-| `replace_exact_line` | Replace exact line match |
+| `replace_exact_line` | Replace specific line |
 | `insert_at_line` | Insert content at line number |
 | `replace_line_range` | Replace range of lines |
-| `insert_relative_to_marker` | Insert before/after marker |
-| `replace_between_markers` | Replace content between delimiters |
-| `append_to_file` | Append content to end |
-| `prepend_to_file` | Prepend content to start |
+| `insert_relative_to_marker` | Insert before/after marker text |
+| `replace_between_markers` | Replace content between markers |
+| `append_to_file` | Add content to end of file |
+| `prepend_to_file` | Add content to start of file |
 | `apply_diff` | Apply unified diff patch |
 | `ast_replace_element` | Replace function/class by name (AST-powered) |
-| `batch_smart_apply` | Execute multiple operations atomically |
 
 ### Backup & Recovery
 
 | Tool | Description |
 |------|-------------|
-| `list_backups` | List available backups for a file |
+| `list_backups` | List all backups for a file |
 | `show_diff` | Show diff between current and backup |
 | `restore_backup` | Restore file from backup |
 
-### Terminal (Sandboxed)
+### Batch Operations
 
 | Tool | Description |
 |------|-------------|
-| `run_terminal` | Execute command in isolated Linux container |
+| `batch_smart_apply` | Execute multiple operations in sequence |
 
-> ⚠️ **Note**: The terminal runs inside Docker and cannot access the host system. For host commands, use your IDE's built-in terminal.
+### Terminal (Docker sandbox)
 
-## Architecture
+| Tool | Description |
+|------|-------------|
+| `run_terminal` | Execute command in Docker container |
+
+## Path Handling
+
+The server accepts both Windows and Linux style paths:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     MCP Client (Cursor)                      │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ stdio (JSON-RPC)
-┌─────────────────────────▼───────────────────────────────────┐
-│                   Docker Container                           │
-│  ┌────────────────────────────────────────────────────────┐ │
-│  │              Code Contractor MCP Server                 │ │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌───────────────┐  │ │
-│  │  │ CodeAnalyzer │ │  CodeLinter  │ │ SearchEngine  │  │ │
-│  │  │ (Tree-sitter)│ │ (Multi-layer)│ │  (ripgrep)    │  │ │
-│  │  └──────────────┘ └──────────────┘ └───────────────┘  │ │
-│  └────────────────────────────────────────────────────────┘ │
-│                              │                               │
-│  ┌───────────────────────────▼──────────────────────────┐   │
-│  │                    /workspace                         │   │
-│  │            (Mounted from host filesystem)             │   │
-│  └───────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+C:\Users\user\project\file.js  →  Works!
+c:/Users/user/project/file.js  →  Works!
+Users/user/project/file.js     →  Works!
 ```
+
+All paths are automatically normalized and routed through the Bridge.
 
 ## Supported Languages
 
-| Language | AST Analysis | Linting | Search |
-|----------|:------------:|:-------:|:------:|
-| JavaScript | ✅ | ✅ ESLint | ✅ |
-| TypeScript | ✅ | ✅ ESLint | ✅ |
-| Python | ✅ | ✅ flake8, pylint | ✅ |
-| Go | ✅ | ⚠️ Basic | ✅ |
-| Java | ✅ | ⚠️ Basic | ✅ |
-| Other | ⚠️ Regex | ⚠️ Basic | ✅ |
+| Language | AST Parsing | Linting | Search |
+|----------|-------------|---------|--------|
+| JavaScript/TypeScript | ✅ Tree-sitter | ✅ ESLint | ✅ |
+| Python | ✅ Tree-sitter | ✅ flake8/pylint | ✅ |
+| Go | ✅ Tree-sitter | ⚠️ Basic | ✅ |
+| Java | ✅ Tree-sitter | ⚠️ Basic | ✅ |
+| Other | ⚠️ Regex fallback | ⚠️ Basic | ✅ |
 
 ## Backup System
 
-All file modifications automatically create backups in `.mcp-backups/` directories:
+All file modifications are automatically backed up to `.mcp-backups/` directories:
 
 ```
 project/
 ├── src/
-│   ├── index.js
+│   ├── app.js
 │   └── .mcp-backups/
-│       ├── index.js.1699999999999
-│       └── index.js.1699999888888
+│       ├── app.js.1699999999999
+│       └── app.js.1699999888888
 ```
 
-Use `list_backups`, `show_diff`, and `restore_backup` tools to manage backups.
+Use `list_backups`, `show_diff`, and `restore_backup` to manage backups.
+
+## Troubleshooting
+
+### Bridge not responding
+
+```bash
+# Check if bridge is running
+curl -X POST http://localhost:9111 -d '{"operation":"ping"}'
+
+# Start bridge manually
+node bridge.js
+```
+
+### Docker can't connect to bridge (Linux)
+
+Make sure you have `--add-host=host.docker.internal:host-gateway` in the Docker args.
+
+### Permission errors
+
+The Bridge runs with YOUR permissions. If you can't access a file normally, the Bridge can't either.
+
+### File not found
+
+- Check the path is correct
+- Ensure the Bridge is running
+- Try with full absolute path
 
 ## Security
 
-- **Sandboxed Execution**: All operations run inside Docker container
-- **Path Validation**: Prevents directory traversal attacks
-- **Sensitive File Blocking**: Blocks access to `.env`, credentials, keys
-- **Dangerous Command Blocking**: Blocks destructive terminal commands
-- **Automatic Backups**: Every modification is backed up
+- **Docker Isolation**: Heavy processing (AST, search, lint) runs in Docker
+- **Bridge Permissions**: File operations use YOUR user permissions
+- **Sensitive Files**: Automatic blocking of `.env`, credentials, keys
+- **No Network**: Docker container has no network access by default
+- **Backups**: All modifications backed up automatically
 
 ## Development
-
-### Local Development
 
 ```bash
 # Install dependencies
 npm install
 
-# Run tests
-npm test
+# Run bridge locally
+node bridge.js
 
-# Build Docker image
-docker build -t code-contractor-mcp .
-
-# Run locally (requires tree-sitter native build)
-npm start
+# Test tools
+node test-all.js
 ```
 
-### Project Structure
+## License
 
-```
-code-contractor-mcp/
-├── server.js           # Main MCP server
-├── CodeAnalyzer.js     # Tree-sitter AST operations
-├── CodeLinter.js       # Multi-layer linting
-├── SearchEngine.js     # ripgrep + AST search
-├── diff-tool.js        # CLI backup/diff utility
-├── Dockerfile          # Container definition
-├── package.json        # Dependencies
-└── README.md           # This file
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**Docker not found**
-```bash
-# Ensure Docker Desktop is running
-docker --version
-```
-
-**Permission denied on Linux/macOS**
-```bash
-# Add user to docker group
-sudo usermod -aG docker $USER
-# Log out and back in
-```
-
-**Path issues on Windows**
-- Use forward slashes in paths: `C:/projects` not `C:\projects`
-- Ensure path is inside mounted volume
-
-**Tool not responding**
-- Restart Docker Desktop
-- Rebuild image: `docker build -t code-contractor-mcp .`
+MIT License - see [LICENSE](LICENSE) file.
 
 ## Contributing
-
-Contributions are welcome! Please:
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
 4. Submit a pull request
 
-## License
+---
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-- [Model Context Protocol](https://modelcontextprotocol.io/) by Anthropic
-- [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) for AST parsing
-- [ripgrep](https://github.com/BurntSushi/ripgrep) for fast search
+**Made with ❤️ for AI-assisted development**

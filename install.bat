@@ -3,6 +3,7 @@ setlocal enabledelayedexpansion
 
 echo ==============================================
 echo   Code Contractor MCP Server - Installer
+echo   With Bridge Architecture for Remote Access
 echo ==============================================
 echo.
 
@@ -23,8 +24,17 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-
 echo [OK] Docker is installed and running
+
+:: Check Node.js
+node --version >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Node.js is not installed.
+    echo Please install Node.js from: https://nodejs.org/
+    pause
+    exit /b 1
+)
+echo [OK] Node.js is installed
 echo.
 
 :: Build Docker image
@@ -40,35 +50,15 @@ echo.
 echo [OK] Docker image built successfully
 echo.
 
-:: Workspace selection
-echo ==============================================
-echo   WORKSPACE CONFIGURATION
-echo ==============================================
+:: Install Node dependencies for bridge
+echo Installing bridge dependencies...
+call npm install
+echo [OK] Dependencies installed
 echo.
-echo The workspace is the folder accessible to MCP tools.
-echo Choose how much access you want to give:
-echo.
-echo   [1] Entire C: drive (recommended - access everything)
-echo   [2] User folder (%USERPROFILE%)
-echo   [3] Custom path
-echo.
-set /p "CHOICE=Enter choice (1/2/3) [default: 1]: "
 
-if "%CHOICE%"=="" set "CHOICE=1"
-if "%CHOICE%"=="1" (
-    set "WORKSPACE_PATH=C:/"
-    set "DOCKER_PATH=C:/"
-) else if "%CHOICE%"=="2" (
-    set "WORKSPACE_PATH=%USERPROFILE%"
-    set "DOCKER_PATH=%USERPROFILE:\=/%"
-) else if "%CHOICE%"=="3" (
-    set /p "CUSTOM_PATH=Enter full path: "
-    set "WORKSPACE_PATH=!CUSTOM_PATH!"
-    set "DOCKER_PATH=!CUSTOM_PATH:\=/!"
-) else (
-    set "WORKSPACE_PATH=C:/"
-    set "DOCKER_PATH=C:/"
-)
+:: Get current directory for bridge path
+set "SCRIPT_DIR=%~dp0"
+set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
 :: Config file location
 set "CONFIG_DIR=%USERPROFILE%\.cursor"
@@ -79,20 +69,38 @@ if not exist "%CONFIG_DIR%" mkdir "%CONFIG_DIR%"
 
 :: Backup existing config if exists
 if exist "%CONFIG_FILE%" (
-    echo.
     echo Backing up existing config to mcp.json.backup
     copy "%CONFIG_FILE%" "%CONFIG_FILE%.backup" >nul
 )
 
-:: Create config content
+:: Create config with bridge support
+:: Using --add-host to allow Docker to connect to host's bridge server
 echo {> "%CONFIG_FILE%"
 echo   "mcpServers": {>> "%CONFIG_FILE%"
 echo     "code-contractor": {>> "%CONFIG_FILE%"
 echo       "command": "docker",>> "%CONFIG_FILE%"
-echo       "args": ["run", "-i", "--rm", "-v", "%DOCKER_PATH%:/workspace", "code-contractor-mcp"]>> "%CONFIG_FILE%"
+echo       "args": ["run", "-i", "--rm", "--add-host=host.docker.internal:host-gateway", "code-contractor-mcp"]>> "%CONFIG_FILE%"
 echo     }>> "%CONFIG_FILE%"
 echo   }>> "%CONFIG_FILE%"
 echo }>> "%CONFIG_FILE%"
+
+:: Create bridge startup script
+set "BRIDGE_SCRIPT=%SCRIPT_DIR%\start-bridge.bat"
+echo @echo off> "%BRIDGE_SCRIPT%"
+echo echo Starting Code Contractor Bridge...>> "%BRIDGE_SCRIPT%"
+echo cd /d "%SCRIPT_DIR%">> "%BRIDGE_SCRIPT%"
+echo node bridge.js>> "%BRIDGE_SCRIPT%"
+
+:: Create bridge startup VBS for hidden window
+set "BRIDGE_VBS=%SCRIPT_DIR%\start-bridge-hidden.vbs"
+echo Set WshShell = CreateObject("WScript.Shell")> "%BRIDGE_VBS%"
+echo WshShell.Run chr(34) ^& "%BRIDGE_SCRIPT%" ^& chr(34), 0>> "%BRIDGE_VBS%"
+echo Set WshShell = Nothing>> "%BRIDGE_VBS%"
+
+:: Add to startup folder
+set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+set "STARTUP_LINK=%STARTUP_FOLDER%\CodeContractorBridge.vbs"
+copy "%BRIDGE_VBS%" "%STARTUP_LINK%" >nul 2>&1
 
 echo.
 echo ==============================================
@@ -100,20 +108,33 @@ echo   Installation Complete!
 echo ==============================================
 echo.
 echo Configuration: %CONFIG_FILE%
-echo Workspace:     %WORKSPACE_PATH%
+echo Bridge Script: %BRIDGE_SCRIPT%
 echo.
-if "%CHOICE%"=="1" (
-    echo Access: FULL DRIVE - All files on C: are accessible
-    echo Example: C:\projects\myapp = /workspace/projects/myapp
-) else (
-    echo Access: %WORKSPACE_PATH%
-)
+echo IMPORTANT - New Bridge Architecture:
+echo   - The Bridge runs on YOUR machine (not in Docker)
+echo   - It handles all file operations with YOUR permissions
+echo   - Works with local files AND remote SSH connections!
 echo.
 echo Next steps:
-echo   1. Restart Cursor IDE
-echo   2. The MCP tools will be available automatically
+echo   1. Start the bridge: "%BRIDGE_SCRIPT%"
+echo      (Or it will auto-start on next Windows login)
+echo   2. Restart Cursor IDE
+echo   3. The MCP tools will be available automatically
 echo.
-echo To verify installation:
-echo   docker run --rm code-contractor-mcp node -e "console.log('OK')"
+echo To verify:
+echo   - Bridge: curl http://localhost:9111 -d "{\"operation\":\"ping\"}"
+echo   - Docker: docker run --rm code-contractor-mcp node -e "console.log('OK')"
+echo.
+
+:: Ask to start bridge now
+set /p "START_NOW=Start the bridge now? (Y/n): "
+if /i "%START_NOW%"=="" set "START_NOW=Y"
+if /i "%START_NOW%"=="Y" (
+    echo.
+    echo Starting bridge in background...
+    start "" wscript.exe "%BRIDGE_VBS%"
+    echo [OK] Bridge started!
+)
+
 echo.
 pause

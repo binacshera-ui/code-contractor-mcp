@@ -2,12 +2,18 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- * Code Contractor MCP Server - Full Power Edition
+ * Code Contractor MCP Server - Full Power Edition with Bridge Architecture
  * ═══════════════════════════════════════════════════════════════════════════════
  * 
- * 🔒 ISOLATED DOCKER ENVIRONMENT
- * This server runs inside a Docker container, completely isolated from the host.
- * All file operations are confined to /workspace mount point.
+ * 🔗 BRIDGE ARCHITECTURE
+ * This server runs inside Docker for heavy processing (AST, search, lint),
+ * but delegates file operations to a Bridge running on the HOST machine.
+ * 
+ * This allows access to:
+ * - Local files
+ * - Remote files via SSH (when using Cursor Remote SSH)
+ * - Network mounts
+ * - Everything the user can access!
  * 
  * 🛠️ CAPABILITIES:
  * - Tree-sitter AST operations (JS/TS/Python/Go/Java)
@@ -17,12 +23,7 @@
  * - Batch operations
  * - Automatic backup system
  * 
- * ⚠️ IMPORTANT FOR USERS:
- * - Use Linux-style paths: "mcp/server.js" NOT "C:\path\file"
- * - Terminal commands run in Docker - NOT on host machine!
- * - For real system commands, use Cursor's built-in Shell tool
- * 
- * 📁 WORKSPACE: /workspace (mounted from host)
+ * 📁 FILE ACCESS: Via Bridge on host machine (port 9111)
  * 📦 BACKUPS: .mcp-backups/ directories (auto-created)
  */
 
@@ -31,6 +32,7 @@ const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio
 const { z } = require('zod');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const { spawn, execSync } = require('child_process');
 const diff = require('diff');
 
@@ -43,10 +45,149 @@ const CodeLinter = require('./CodeLinter');
 // Configuration
 // =============================================================================
 
+const BRIDGE_HOST = process.env.BRIDGE_HOST || 'host.docker.internal';
+const BRIDGE_PORT = process.env.BRIDGE_PORT || 9111;
+const BRIDGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}`;
+const USE_BRIDGE = process.env.USE_BRIDGE !== 'false';
+
 const WORKSPACE_ROOT = process.env.MCP_WORKSPACE || '/workspace';
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || '3000000'); // 3MB
 const MAX_LINES = parseInt(process.env.MAX_LINES || '3000');
 const BACKUP_ENABLED = process.env.BACKUP !== 'false';
+
+// =============================================================================
+// Bridge Client - Communicates with local Bridge for file operations
+// =============================================================================
+
+async function callBridge(operation, params = {}) {
+    return new Promise((resolve, reject) => {
+        const data = JSON.stringify({ operation, params });
+        
+        const options = {
+            hostname: BRIDGE_HOST,
+            port: BRIDGE_PORT,
+            path: '/',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(data)
+            },
+            timeout: 30000
+        };
+        
+        const req = http.request(options, (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => {
+                try {
+                    const result = JSON.parse(body);
+                    if (result.success) {
+                        resolve(result.result);
+                    } else {
+                        reject(new Error(result.error || 'Bridge operation failed'));
+                    }
+                } catch (e) {
+                    reject(new Error(`Bridge response parse error: ${e.message}`));
+                }
+            });
+        });
+        
+        req.on('error', (e) => {
+            reject(new Error(`Bridge connection failed: ${e.message}. Is the bridge running?`));
+        });
+        
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Bridge request timeout'));
+        });
+        
+        req.write(data);
+        req.end();
+    });
+}
+
+// Bridge-aware file operations
+const bridge = {
+    async readFile(filePath) {
+        if (USE_BRIDGE) {
+            const result = await callBridge('read_file', { path: filePath });
+            return result.content;
+        }
+        return fs.readFileSync(filePath, 'utf-8');
+    },
+    
+    async writeFile(filePath, content) {
+        if (USE_BRIDGE) {
+            return await callBridge('write_file', { path: filePath, content });
+        }
+        fs.writeFileSync(filePath, content, 'utf-8');
+        return { status: 'success', file: filePath };
+    },
+    
+    async exists(filePath) {
+        if (USE_BRIDGE) {
+            const result = await callBridge('exists', { path: filePath });
+            return result.exists;
+        }
+        return fs.existsSync(filePath);
+    },
+    
+    async deleteFile(filePath) {
+        if (USE_BRIDGE) {
+            return await callBridge('delete_file', { path: filePath });
+        }
+        fs.unlinkSync(filePath);
+        return { status: 'success', file: filePath };
+    },
+    
+    async listDir(dirPath, maxDepth = 3) {
+        if (USE_BRIDGE) {
+            return await callBridge('list_dir', { path: dirPath, max_depth: maxDepth });
+        }
+        // Fallback to local implementation
+        return getProjectStructure(dirPath, 0, maxDepth);
+    },
+    
+    async stat(filePath) {
+        if (USE_BRIDGE) {
+            return await callBridge('stat', { path: filePath });
+        }
+        const stats = fs.statSync(filePath);
+        return {
+            size: stats.size,
+            isDirectory: stats.isDirectory(),
+            isFile: stats.isFile()
+        };
+    },
+    
+    async runCommand(command, cwd) {
+        if (USE_BRIDGE) {
+            return await callBridge('run_command', { command, cwd });
+        }
+        // Fallback to local execution
+        return new Promise((resolve) => {
+            const child = spawn('sh', ['-c', command], { cwd });
+            let stdout = '', stderr = '';
+            child.stdout.on('data', d => stdout += d);
+            child.stderr.on('data', d => stderr += d);
+            child.on('close', code => resolve({ status: code === 0 ? 'success' : 'error', exit_code: code, stdout, stderr }));
+        });
+    },
+    
+    async listBackups(filePath) {
+        if (USE_BRIDGE) {
+            return await callBridge('list_backups', { path: filePath });
+        }
+        return { backups: [] };
+    },
+    
+    async restoreBackup(filePath, backupPath, confirm) {
+        if (USE_BRIDGE) {
+            return await callBridge('restore_backup', { file: filePath, backup: backupPath, confirm });
+        }
+        throw new Error('Restore not available without bridge');
+    }
+};
 
 // =============================================================================
 // Security & Helpers
@@ -173,9 +314,15 @@ server.tool(
         max_depth: z.number().optional().describe('Directory depth limit (default: 3)')
     },
     async ({ path: inputPath = '.', max_depth = 3 }) => {
-        const targetPath = resolveSafePath(inputPath);
-        const tree = getProjectStructure(targetPath, 0, max_depth);
-        return { content: [{ type: 'text', text: JSON.stringify(tree, null, 2) }] };
+        try {
+            const tree = await bridge.listDir(inputPath, max_depth);
+            return { content: [{ type: 'text', text: JSON.stringify(tree, null, 2) }] };
+        } catch (e) {
+            // Fallback to local if bridge fails
+            const targetPath = resolveSafePath(inputPath);
+            const tree = getProjectStructure(targetPath, 0, max_depth);
+            return { content: [{ type: 'text', text: JSON.stringify(tree, null, 2) }] };
+        }
     }
 );
 
@@ -193,48 +340,82 @@ server.tool(
         force_full: z.boolean().optional().describe('Force full read even for large files')
     },
     async ({ path: inputPath, line_start, line_end, force_full = false }) => {
-        const filePath = resolveSafePath(inputPath);
-        
         if (isSensitivePath(inputPath)) {
             throw new Error(`Security: Access to sensitive file '${inputPath}' is prohibited`);
         }
         
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`File not found: ${inputPath}`);
-        }
-        
-        let content = fs.readFileSync(filePath, 'utf-8');
-        const totalLines = content.split('\n').length;
-        
-        // Block large files unless range specified or force
-        if (!force_full && totalLines > MAX_LINES && !line_start && !line_end) {
+        try {
+            // Try bridge first
+            let content = await bridge.readFile(inputPath);
+            const totalLines = content.split('\n').length;
+            
+            // Block large files unless range specified or force
+            if (!force_full && totalLines > MAX_LINES && !line_start && !line_end) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            status: 'TRUNCATED',
+                            file: inputPath,
+                            total_lines: totalLines,
+                            limit: MAX_LINES,
+                            message: `File too large (${totalLines} lines). Use line_start/line_end or extract_code_element.`
+                        })
+                    }]
+                };
+            }
+            
+            if (line_start !== undefined || line_end !== undefined) {
+                const lines = content.split('\n');
+                const start = Math.max(0, (line_start || 1) - 1);
+                const end = Math.min(lines.length, line_end || lines.length);
+                content = lines.slice(start, end).join('\n');
+            }
+            
             return {
                 content: [{
                     type: 'text',
-                    text: JSON.stringify({
-                        status: 'TRUNCATED',
-                        file: inputPath,
-                        total_lines: totalLines,
-                        limit: MAX_LINES,
-                        message: `File too large (${totalLines} lines). Use line_start/line_end or extract_code_element.`
-                    })
+                    text: JSON.stringify({ file: inputPath, total_lines: totalLines, content })
+                }]
+            };
+        } catch (e) {
+            // Fallback to local
+            const filePath = resolveSafePath(inputPath);
+            if (!fs.existsSync(filePath)) {
+                throw new Error(`File not found: ${inputPath}`);
+            }
+            let content = fs.readFileSync(filePath, 'utf-8');
+            const totalLines = content.split('\n').length;
+            
+            if (!force_full && totalLines > MAX_LINES && !line_start && !line_end) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            status: 'TRUNCATED',
+                            file: inputPath,
+                            total_lines: totalLines,
+                            limit: MAX_LINES,
+                            message: `File too large (${totalLines} lines). Use line_start/line_end or extract_code_element.`
+                        })
+                    }]
+                };
+            }
+            
+            if (line_start !== undefined || line_end !== undefined) {
+                const lines = content.split('\n');
+                const start = Math.max(0, (line_start || 1) - 1);
+                const end = Math.min(lines.length, line_end || lines.length);
+                content = lines.slice(start, end).join('\n');
+            }
+            
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({ file: inputPath, total_lines: totalLines, content })
                 }]
             };
         }
-        
-        if (line_start !== undefined || line_end !== undefined) {
-            const lines = content.split('\n');
-            const start = Math.max(0, (line_start || 1) - 1);
-            const end = Math.min(lines.length, line_end || lines.length);
-            content = lines.slice(start, end).join('\n');
-        }
-        
-        return {
-            content: [{
-                type: 'text',
-                text: JSON.stringify({ file: inputPath, total_lines: totalLines, content })
-            }]
-        };
     }
 );
 
@@ -546,29 +727,43 @@ server.tool(
         content: z.string().describe('Full file content')
     },
     async ({ path: inputPath, content }) => {
-        const filePath = resolveSafePath(inputPath);
-        const existed = fs.existsSync(filePath);
-        
-        const dir = path.dirname(filePath);
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+        try {
+            const result = await bridge.writeFile(inputPath, content);
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        status: 'success',
+                        action: result.action || 'created',
+                        file: inputPath,
+                        lines: content.split('\n').length,
+                        backup: result.backup
+                    })
+                }]
+            };
+        } catch (e) {
+            // Fallback to local
+            const filePath = resolveSafePath(inputPath);
+            const existed = fs.existsSync(filePath);
+            const dir = path.dirname(filePath);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            const backupPath = backupFile(filePath);
+            fs.writeFileSync(filePath, content, 'utf-8');
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        status: 'success',
+                        action: existed ? 'overwritten' : 'created',
+                        file: inputPath,
+                        lines: content.split('\n').length,
+                        backup: backupPath
+                    })
+                }]
+            };
         }
-        
-        const backupPath = backupFile(filePath);
-        fs.writeFileSync(filePath, content, 'utf-8');
-        
-        return {
-            content: [{
-                type: 'text',
-                text: JSON.stringify({
-                    status: 'success',
-                    action: existed ? 'overwritten' : 'created',
-                    file: inputPath,
-                    lines: content.split('\n').length,
-                    backup: backupPath
-                })
-            }]
-        };
     }
 );
 
@@ -582,20 +777,27 @@ server.tool(
         path: z.string().describe('File path (Windows or Linux style)')
     },
     async ({ path: inputPath }) => {
-        const filePath = resolveSafePath(inputPath);
-        
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`File not found: ${inputPath}`);
-        }
-        
-        const backupPath = backupFile(filePath);
-        fs.unlinkSync(filePath);
-        
-        return {
-            content: [{
-                type: 'text',
-                text: JSON.stringify({ status: 'success', action: 'deleted', file: inputPath, backup: backupPath })
-            }]
+        try {
+            const result = await bridge.deleteFile(inputPath);
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify(result)
+                }]
+            };
+        } catch (e) {
+            // Fallback to local
+            const filePath = resolveSafePath(inputPath);
+            if (!fs.existsSync(filePath)) {
+                throw new Error(`File not found: ${inputPath}`);
+            }
+            const backupPath = backupFile(filePath);
+            fs.unlinkSync(filePath);
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({ status: 'success', action: 'deleted', file: inputPath, backup: backupPath })
+                }]
         };
     }
 );
