@@ -37,7 +37,7 @@ cd "$INSTALL_DIR"
 echo "Working in: $INSTALL_DIR"
 
 # Download files from GitHub
-REPO_URL="https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/mcp-server"
+REPO_URL="https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main"
 echo ""
 echo "Downloading files..."
 
@@ -46,7 +46,8 @@ curl -fsSL "$REPO_URL/package.json" -o package.json
 curl -fsSL "$REPO_URL/server.js" -o server.js
 curl -fsSL "$REPO_URL/SearchEngine.js" -o SearchEngine.js
 curl -fsSL "$REPO_URL/CodeLinter.js" -o CodeLinter.js
-curl -fsSL "$REPO_URL/ASTParser.js" -o ASTParser.js
+curl -fsSL "$REPO_URL/CodeAnalyzer.js" -o CodeAnalyzer.js
+curl -fsSL "$REPO_URL/diff-tool.js" -o diff-tool.js
 
 echo -e "${GREEN}[OK]${NC} Files downloaded"
 
