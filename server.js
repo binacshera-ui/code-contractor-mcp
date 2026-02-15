@@ -67,7 +67,34 @@ function isSensitivePath(filePath) {
 }
 
 function resolveSafePath(inputPath) {
-    const resolved = path.resolve(WORKSPACE_ROOT, inputPath);
+    let normalizedPath = inputPath;
+    
+    // Auto-translate Windows paths to internal paths
+    // Example: "C:\Users\user\project" -> "/workspace/Users/user/project"
+    // Example: "c:/Users/user/project" -> "/workspace/Users/user/project"
+    const windowsPathMatch = normalizedPath.match(/^([a-zA-Z]):[\\\/](.*)$/);
+    if (windowsPathMatch) {
+        // Extract path after drive letter, convert backslashes to forward slashes
+        const pathAfterDrive = windowsPathMatch[2].replace(/\\/g, '/');
+        normalizedPath = pathAfterDrive;
+    }
+    
+    // Also handle paths that already start with /workspace
+    if (normalizedPath.startsWith('/workspace/')) {
+        normalizedPath = normalizedPath.substring('/workspace/'.length);
+    } else if (normalizedPath.startsWith('/workspace')) {
+        normalizedPath = normalizedPath.substring('/workspace'.length) || '.';
+    }
+    
+    // Convert any remaining backslashes to forward slashes
+    normalizedPath = normalizedPath.replace(/\\/g, '/');
+    
+    // Remove leading slash if present (we'll add it via WORKSPACE_ROOT)
+    if (normalizedPath.startsWith('/')) {
+        normalizedPath = normalizedPath.substring(1);
+    }
+    
+    const resolved = path.resolve(WORKSPACE_ROOT, normalizedPath);
     if (!resolved.startsWith(WORKSPACE_ROOT)) {
         throw new Error(`Security: Path '${inputPath}' is outside workspace`);
     }
@@ -137,12 +164,12 @@ const server = new McpServer({
 server.tool(
     'get_file_tree',
     `[ISOLATED DOCKER ENV] Get file tree structure for code exploration.
-• Runs inside Docker container at /workspace
-• Use Linux-style paths: "mcp/server.js" (NOT "C:\\path")
+• Accepts Windows paths (C:\\Users\\...) OR Linux paths - auto-converts!
 • Filters out node_modules, .git, dist, build automatically
-• Use for understanding project structure before editing`,
+• Use for understanding project structure before editing
+• Examples: "C:\\Users\\user\\project" or "Users/user/project" both work`,
     {
-        path: z.string().optional().describe('Relative path from /workspace (default: ".")'),
+        path: z.string().optional().describe('Path (Windows like C:\\path or Linux like path/to/dir). Default: workspace root'),
         max_depth: z.number().optional().describe('Directory depth limit (default: 3)')
     },
     async ({ path: inputPath = '.', max_depth = 3 }) => {
@@ -155,12 +182,12 @@ server.tool(
 server.tool(
     'read_file',
     `[ISOLATED DOCKER ENV] Read file content with optional line range.
-• Lightweight alternative to Cursor's Read tool
+• Accepts Windows paths (C:\\path) OR Linux paths - auto-converts!
 • Blocks files >3000 lines without range (use line_start/line_end)
-• Use Linux paths: "mcp/server.js" or "/workspace/mcp/server.js"
+• Examples: "C:\\Users\\user\\file.js" or "Users/user/file.js" both work
 • Returns JSON with file metadata + content`,
     {
-        path: z.string().describe('Linux-style file path relative to /workspace'),
+        path: z.string().describe('File path (Windows C:\\path\\file.js or Linux path/file.js)'),
         line_start: z.number().optional().describe('Start line number (1-based, inclusive)'),
         line_end: z.number().optional().describe('End line number (1-based, inclusive)'),
         force_full: z.boolean().optional().describe('Force full read even for large files')
@@ -219,7 +246,7 @@ server.tool(
 • Perfect for understanding file structure before targeted edits
 • Fallback to regex for unsupported languages`,
     {
-        path: z.string().describe('Linux-style file path to analyze')
+        path: z.string().describe('File path (Windows or Linux style)')
     },
     async ({ path: inputPath }) => {
         const filePath = resolveSafePath(inputPath);
@@ -314,7 +341,7 @@ server.tool(
 • Better than line-based search - understands code structure
 • Languages: JavaScript, TypeScript, Python, Go, Java`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         element_name: z.string().describe('Name of function/class/variable to extract'),
         type: z.enum(['function', 'class', 'variable']).describe('Type of code element'),
         context_lines: z.number().optional().describe('Lines of context around element (default: 5)')
@@ -457,7 +484,7 @@ server.tool(
 • Returns: errors, warnings, info with line numbers
 • Complementary to Cursor's ReadLints - more comprehensive`,
     {
-        path: z.string().describe('Linux-style file path to lint')
+        path: z.string().describe('File path (Windows or Linux style)')
     },
     async ({ path: inputPath }) => {
         const filePath = resolveSafePath(inputPath);
@@ -515,7 +542,7 @@ server.tool(
 • Faster than Cursor's Write for bulk operations
 • Use for generating new files or complete rewrites`,
     {
-        path: z.string().describe('Linux-style file path to create'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         content: z.string().describe('Full file content')
     },
     async ({ path: inputPath, content }) => {
@@ -552,7 +579,7 @@ server.tool(
 • Recoverable via restore_backup tool
 • EXECUTES IMMEDIATELY - no confirmation dialog`,
     {
-        path: z.string().describe('Linux-style file path to delete')
+        path: z.string().describe('File path (Windows or Linux style)')
     },
     async ({ path: inputPath }) => {
         const filePath = resolveSafePath(inputPath);
@@ -586,7 +613,7 @@ server.tool(
 • Better for simple text substitutions without line tracking
 • Use Cursor's StrReplace for complex multi-line changes`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         find: z.string().describe('Exact text to find'),
         replace_with: z.string().describe('Replacement text'),
         all: z.boolean().optional().describe('Replace all occurrences (default: true)')
@@ -635,7 +662,7 @@ server.tool(
 • Automatic backup before change
 • Throws error if line not found (safe)`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         line_to_find: z.string().describe('Complete line to find (exact match required)'),
         replacement_line: z.string().describe('Complete replacement line')
     },
@@ -684,7 +711,7 @@ server.tool(
 • Automatic backup before change
 • Use for adding imports, new functions at specific locations`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         line_number: z.number().describe('Line number where content will be inserted (1-based)'),
         content: z.string().describe('Content to insert (can be multi-line)')
     },
@@ -721,7 +748,7 @@ server.tool(
 • Perfect for replacing entire functions/blocks by line range
 • Combine with get_file_outline to find line ranges`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         start_line: z.number().describe('First line to replace (1-based, inclusive)'),
         end_line: z.number().describe('Last line to replace (1-based, inclusive)'),
         content: z.string().describe('New content to insert (can be multi-line)')
@@ -763,7 +790,7 @@ server.tool(
 • Good for adding code near specific patterns
 • Example: Insert after "// IMPORTS" comment`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         marker: z.string().describe('Text pattern to find as anchor point'),
         position: z.enum(['before', 'after']).describe('Insert before or after the marker'),
         content: z.string().describe('Content to insert (can be multi-line)')
@@ -810,7 +837,7 @@ server.tool(
 • include_markers=true also replaces the markers themselves
 • Great for template sections with delimiters`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         start_marker: z.string().describe('Opening delimiter text'),
         end_marker: z.string().describe('Closing delimiter text'),
         content: z.string().describe('New content to insert between markers'),
@@ -860,7 +887,7 @@ server.tool(
 • Automatic backup for existing files
 • Use for adding new functions, exports at file end`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         content: z.string().describe('Content to add at end of file')
     },
     async ({ path: inputPath, content: newContent }) => {
@@ -886,7 +913,7 @@ server.tool(
 • Automatic backup for existing files
 • Use for adding imports, file headers, licenses`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         content: z.string().describe('Content to add at start of file')
     },
     async ({ path: inputPath, content: newContent }) => {
@@ -914,7 +941,7 @@ server.tool(
 • Automatic backup before applying
 • Fails safely if content has changed`,
     {
-        path: z.string().describe('Linux-style file path to patch'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         diff_content: z.string().describe('Unified diff content (with --- +++ @@ headers)')
     },
     async ({ path: inputPath, diff_content }) => {
@@ -965,7 +992,7 @@ server.tool(
 • Languages: JavaScript, TypeScript, Python, Go, Java
 • Much safer than text-based replacement`,
     {
-        path: z.string().describe('Linux-style file path'),
+        path: z.string().describe('File path (Windows or Linux style)'),
         element_name: z.string().describe('Name of function or class to replace'),
         element_type: z.enum(['function', 'class']).describe('Type of element'),
         new_content: z.string().describe('Complete new implementation')
@@ -1326,7 +1353,7 @@ server.tool(
 • Shows: filename, timestamp, date, size
 • Use with show_diff and restore_backup`,
     {
-        path: z.string().describe('Linux-style file path to list backups for')
+        path: z.string().describe('File path (Windows or Linux style)')
     },
     async ({ path: inputPath }) => {
         const targetPath = resolveSafePath(inputPath);
@@ -1375,7 +1402,7 @@ server.tool(
 • Shows additions/deletions count
 • Includes Cursor command for visual diff viewer`,
     {
-        current: z.string().describe('Linux-style path to current file'),
+        current: z.string().describe('File path (Windows or Linux style)'),
         backup: z.string().optional().describe('Specific backup file path (default: latest backup)'),
         context_lines: z.number().optional().describe('Lines of context around changes (default: 3)')
     },
@@ -1460,7 +1487,7 @@ server.tool(
 • Backs up current state before restoring (safe to undo)
 • Use latest backup or specify specific backup file`,
     {
-        file: z.string().describe('Linux-style path to file to restore'),
+        file: z.string().describe('File path (Windows or Linux style)'),
         backup: z.string().optional().describe('Specific backup to restore (default: latest)'),
         confirm: z.boolean().optional().describe('Set to true to actually perform restore (default: preview only)')
     },
