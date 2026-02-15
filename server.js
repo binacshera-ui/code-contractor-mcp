@@ -210,35 +210,42 @@ function isSensitivePath(filePath) {
 function resolveSafePath(inputPath) {
     let normalizedPath = inputPath;
     
-    // Auto-translate Windows paths to internal paths
-    // Example: "C:\Users\user\project" -> "/workspace/Users/user/project"
-    // Example: "c:/Users/user/project" -> "/workspace/Users/user/project"
-    const windowsPathMatch = normalizedPath.match(/^([a-zA-Z]):[\\\/](.*)$/);
-    if (windowsPathMatch) {
-        // Extract path after drive letter, convert backslashes to forward slashes
-        const pathAfterDrive = windowsPathMatch[2].replace(/\\/g, '/');
-        normalizedPath = pathAfterDrive;
-    }
-    
-    // Also handle paths that already start with /workspace
-    if (normalizedPath.startsWith('/workspace/')) {
-        normalizedPath = normalizedPath.substring('/workspace/'.length);
-    } else if (normalizedPath.startsWith('/workspace')) {
-        normalizedPath = normalizedPath.substring('/workspace'.length) || '.';
-    }
-    
-    // Convert any remaining backslashes to forward slashes
+    // Convert backslashes to forward slashes first
     normalizedPath = normalizedPath.replace(/\\/g, '/');
     
-    // Remove leading slash if present (we'll add it via WORKSPACE_ROOT)
-    if (normalizedPath.startsWith('/')) {
-        normalizedPath = normalizedPath.substring(1);
+    // Handle Windows paths: C:\path or C:/path -> just the path part
+    const windowsPathMatch = normalizedPath.match(/^([a-zA-Z]):\/(.*)$/);
+    if (windowsPathMatch) {
+        normalizedPath = '/' + windowsPathMatch[2];
+    }
+    
+    // Handle /workspace prefix (Docker mount)
+    if (normalizedPath.startsWith('/workspace/')) {
+        normalizedPath = normalizedPath.substring('/workspace'.length);
+    } else if (normalizedPath === '/workspace') {
+        normalizedPath = '/';
+    }
+    
+    // IMPORTANT: For absolute Linux paths (like /root/..., /home/..., /var/...)
+    // When using Bridge, these should be passed as-is to the Bridge
+    // The Bridge runs on the host and can access these paths directly
+    if (normalizedPath.startsWith('/') && USE_BRIDGE) {
+        // Return absolute path as-is for Bridge to handle
+        return normalizedPath;
+    }
+    
+    // For Docker-only mode or relative paths, resolve against WORKSPACE_ROOT
+    if (!normalizedPath.startsWith('/')) {
+        normalizedPath = '/' + normalizedPath;
     }
     
     const resolved = path.resolve(WORKSPACE_ROOT, normalizedPath);
-    if (!resolved.startsWith(WORKSPACE_ROOT)) {
-        throw new Error(`Security: Path '${inputPath}' is outside workspace`);
+    
+    // In Docker-only mode (no Bridge), enforce workspace boundary
+    if (!USE_BRIDGE && !resolved.startsWith(WORKSPACE_ROOT)) {
+        throw new Error(`Security: Path '${inputPath}' is outside workspace. Use Bridge for full filesystem access.`);
     }
+    
     return resolved;
 }
 
@@ -316,11 +323,13 @@ server.tool(
     async ({ path: inputPath }) => {
         const filePath = resolveSafePath(inputPath);
         
-        if (!fs.existsSync(filePath)) {
+        // Use Bridge for file access (supports remote files)
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const content = await bridge.readFile(filePath);
         const language = detectLanguage(filePath);
         
         if (!language) {
@@ -419,7 +428,8 @@ server.tool(
             throw new Error(`Unsupported file type for AST: ${inputPath}`);
         }
         
-        const content = fs.readFileSync(filePath, 'utf-8');
+        // Use Bridge for file access (supports remote files)
+        const content = await bridge.readFile(filePath);
         
         try {
             const analyzer = new CodeAnalyzer(language);
@@ -619,11 +629,12 @@ server.tool(
     async ({ path: inputPath, line_to_find, replacement_line }) => {
         const filePath = resolveSafePath(inputPath);
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const lines = original.split('\n');
         let found = false;
         let lineNum = -1;
@@ -642,7 +653,7 @@ server.tool(
         }
         
         const backupPath = backupFile(filePath);
-        fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+        await bridge.writeFile(filePath, lines.join('\n'));
         
         return {
             content: [{
@@ -668,18 +679,19 @@ server.tool(
     async ({ path: inputPath, line_number, content: newContent }) => {
         const filePath = resolveSafePath(inputPath);
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         const lines = original.split('\n');
         
         const insertIndex = Math.max(0, Math.min(lines.length, line_number - 1));
         lines.splice(insertIndex, 0, newContent);
         
-        fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+        await bridge.writeFile(filePath, lines.join('\n'));
         
         return {
             content: [{
@@ -706,11 +718,12 @@ server.tool(
     async ({ path: inputPath, start_line, end_line, content: newContent }) => {
         const filePath = resolveSafePath(inputPath);
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         const lines = original.split('\n');
         
@@ -721,7 +734,7 @@ server.tool(
         const newLines = newContent.split('\n');
         lines.splice(startIdx, removed, ...newLines);
         
-        fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+        await bridge.writeFile(filePath, lines.join('\n'));
         
         return {
             content: [{
@@ -748,11 +761,12 @@ server.tool(
     async ({ path: inputPath, marker, position, content: newContent }) => {
         const filePath = resolveSafePath(inputPath);
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         
         const markerIndex = original.indexOf(marker);
@@ -768,7 +782,7 @@ server.tool(
             result = original.slice(0, afterMarker) + newContent + original.slice(afterMarker);
         }
         
-        fs.writeFileSync(filePath, result, 'utf-8');
+        await bridge.writeFile(filePath, result);
         
         return {
             content: [{
@@ -796,11 +810,12 @@ server.tool(
     async ({ path: inputPath, start_marker, end_marker, content: newContent, include_markers = false }) => {
         const filePath = resolveSafePath(inputPath);
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         
         const startIdx = original.indexOf(start_marker);
@@ -818,7 +833,7 @@ server.tool(
         const replaceEnd = include_markers ? endIdx + end_marker.length : endIdx;
         
         const result = original.slice(0, replaceStart) + newContent + original.slice(replaceEnd);
-        fs.writeFileSync(filePath, result, 'utf-8');
+        await bridge.writeFile(filePath, result);
         
         return {
             content: [{
@@ -844,7 +859,10 @@ server.tool(
         const filePath = resolveSafePath(inputPath);
         const backupPath = backupFile(filePath);
         
-        fs.appendFileSync(filePath, newContent, 'utf-8');
+        // Append using Bridge
+        const exists = await bridge.exists(filePath);
+        const original = exists ? await bridge.readFile(filePath) : '';
+        await bridge.writeFile(filePath, original + newContent);
         
         return {
             content: [{
@@ -869,10 +887,11 @@ server.tool(
     async ({ path: inputPath, content: newContent }) => {
         const filePath = resolveSafePath(inputPath);
         
-        const original = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
+        const exists = await bridge.exists(filePath);
+        const original = exists ? await bridge.readFile(filePath) : '';
         const backupPath = backupFile(filePath);
         
-        fs.writeFileSync(filePath, newContent + original, 'utf-8');
+        await bridge.writeFile(filePath, newContent + original);
         
         return {
             content: [{
@@ -897,11 +916,12 @@ server.tool(
     async ({ path: inputPath, diff_content }) => {
         const filePath = resolveSafePath(inputPath);
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         
         const patches = diff.parsePatch(diff_content);
@@ -918,7 +938,7 @@ server.tool(
             result = applied;
         }
         
-        fs.writeFileSync(filePath, result, 'utf-8');
+        await bridge.writeFile(filePath, result);
         
         return {
             content: [{
@@ -955,17 +975,18 @@ server.tool(
             throw new Error(`Unsupported file type for AST: ${inputPath}`);
         }
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         
         const analyzer = new CodeAnalyzer(language);
         const result = analyzer.replaceElement(original, element_name, element_type, new_content);
         
-        fs.writeFileSync(filePath, result, 'utf-8');
+        await bridge.writeFile(filePath, result);
         
         return {
             content: [{
@@ -1004,11 +1025,12 @@ server.tool(
             throw new Error(`Unsupported file type for AST: ${inputPath}`);
         }
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         
         // Simple regex-based rename with word boundaries (safer than plain replace)
@@ -1022,7 +1044,7 @@ server.tool(
             throw new Error(`Symbol '${old_name}' not found in file`);
         }
         
-        fs.writeFileSync(filePath, result, 'utf-8');
+        await bridge.writeFile(filePath, result);
         
         return {
             content: [{
@@ -1059,11 +1081,12 @@ server.tool(
         const filePath = resolveSafePath(inputPath);
         const language = detectLanguage(filePath);
         
-        if (!fs.existsSync(filePath)) {
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
         }
         
-        const original = fs.readFileSync(filePath, 'utf-8');
+        const original = await bridge.readFile(filePath);
         const backupPath = backupFile(filePath);
         
         // Check if import already exists
@@ -1124,7 +1147,7 @@ server.tool(
         lines.splice(insertIndex, 0, importStatement.trim());
         const result = lines.join('\n');
         
-        fs.writeFileSync(filePath, result, 'utf-8');
+        await bridge.writeFile(filePath, result);
         
         return {
             content: [{
