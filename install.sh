@@ -34,23 +34,37 @@ docker build -t code-contractor-mcp .
 echo ""
 echo "✓ Docker image built successfully"
 
-# Smart default: go up from mcp-server to the projects folder
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PARENT_DIR="$(dirname "$SCRIPT_DIR")"
-WORKSPACE_PATH="$PARENT_DIR"
+# Workspace selection
+echo ""
+echo "=============================================="
+echo "  WORKSPACE CONFIGURATION"
+echo "=============================================="
+echo ""
+echo "The workspace is the folder accessible to MCP tools."
+echo "Choose how much access you want to give:"
+echo ""
+echo "  [1] Home directory ($HOME) - recommended"
+echo "  [2] Root (/) - full system access"
+echo "  [3] Custom path"
+echo ""
+read -p "Enter choice (1/2/3) [default: 1]: " CHOICE
 
-echo ""
-echo "WORKSPACE CONFIGURATION"
-echo "======================="
-echo "The workspace is the folder that will be accessible to the MCP tools."
-echo "All your projects inside this folder will be available."
-echo ""
-echo "Suggested workspace: $WORKSPACE_PATH"
-echo ""
-read -p "Enter workspace path (or press Enter to accept): " CUSTOM_PATH
-if [ -n "$CUSTOM_PATH" ]; then
-    WORKSPACE_PATH="$CUSTOM_PATH"
-fi
+CHOICE=${CHOICE:-1}
+
+case $CHOICE in
+    1)
+        WORKSPACE_PATH="$HOME"
+        ;;
+    2)
+        WORKSPACE_PATH="/"
+        ;;
+    3)
+        read -p "Enter full path: " WORKSPACE_PATH
+        ;;
+    *)
+        WORKSPACE_PATH="$HOME"
+        ;;
+esac
 
 # Validate path exists
 if [ ! -d "$WORKSPACE_PATH" ]; then
@@ -60,15 +74,8 @@ if [ ! -d "$WORKSPACE_PATH" ]; then
     mkdir -p "$WORKSPACE_PATH"
 fi
 
-# Detect OS and set config path
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    CONFIG_DIR="$HOME/.cursor"
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    CONFIG_DIR="$HOME/.cursor"
-else
-    CONFIG_DIR="$HOME/.cursor"
-fi
-
+# Config file location
+CONFIG_DIR="$HOME/.cursor"
 CONFIG_FILE="$CONFIG_DIR/mcp.json"
 
 # Create config directory if needed
@@ -100,10 +107,16 @@ echo "=============================================="
 echo ""
 echo "Configuration: $CONFIG_FILE"
 echo "Workspace:     $WORKSPACE_PATH"
-echo "Docker path:   ${WORKSPACE_PATH}:/workspace"
 echo ""
-echo "IMPORTANT: Your projects should be inside: $WORKSPACE_PATH"
-echo "           They will be accessible at: /workspace/[project-name]"
+if [ "$CHOICE" = "1" ]; then
+    echo "Access: HOME DIRECTORY - All files in $HOME are accessible"
+    echo "Example: ~/projects/myapp = /workspace/projects/myapp"
+elif [ "$CHOICE" = "2" ]; then
+    echo "Access: FULL SYSTEM - All files are accessible"
+    echo "Example: /home/user/projects = /workspace/home/user/projects"
+else
+    echo "Access: $WORKSPACE_PATH"
+fi
 echo ""
 echo "Next steps:"
 echo "  1. Restart Cursor IDE"

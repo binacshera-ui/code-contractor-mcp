@@ -57,33 +57,34 @@ docker build -t code-contractor-mcp .
 
 ### Configuration
 
-Add to your MCP client configuration file:
+Add to your MCP client configuration file (`~/.cursor/mcp.json` or `%USERPROFILE%\.cursor\mcp.json`):
 
-**Cursor IDE** (`~/.cursor/mcp.json`):
+**Windows - Full Drive Access (Recommended):**
 ```json
 {
   "mcpServers": {
     "code-contractor": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-v", "/path/to/your/projects:/workspace", "code-contractor-mcp"]
+      "args": ["run", "-i", "--rm", "-v", "C:/:/workspace", "code-contractor-mcp"]
     }
   }
 }
 ```
+This gives access to your entire C: drive. Example: `C:\projects\myapp` → `/workspace/projects/myapp`
 
-**Windows** (`%USERPROFILE%\.cursor\mcp.json`):
+**macOS/Linux - Home Directory:**
 ```json
 {
   "mcpServers": {
     "code-contractor": {
-      "command": "cmd",
-      "args": ["/c", "docker", "run", "-i", "--rm", "-v", "C:/projects:/workspace", "code-contractor-mcp"]
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-v", "/Users/yourname:/workspace", "code-contractor-mcp"]
     }
   }
 }
 ```
 
-> **Important**: Replace `/path/to/your/projects` with your actual workspace path.
+> **Tip**: The installer (`install.bat` / `install.sh`) will guide you through workspace configuration automatically.
 
 ## Tools Reference
 

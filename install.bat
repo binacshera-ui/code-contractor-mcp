@@ -40,32 +40,35 @@ echo.
 echo [OK] Docker image built successfully
 echo.
 
-:: Smart default: go up from mcp-server to the projects folder
-:: If running from C:\projects\code-contractor-mcp, default to C:\projects
-for %%I in ("%cd%\..") do set "PARENT_DIR=%%~fI"
-set "WORKSPACE_PATH=%PARENT_DIR%"
+:: Workspace selection
+echo ==============================================
+echo   WORKSPACE CONFIGURATION
+echo ==============================================
+echo.
+echo The workspace is the folder accessible to MCP tools.
+echo Choose how much access you want to give:
+echo.
+echo   [1] Entire C: drive (recommended - access everything)
+echo   [2] User folder (%USERPROFILE%)
+echo   [3] Custom path
+echo.
+set /p "CHOICE=Enter choice (1/2/3) [default: 1]: "
 
-echo.
-echo WORKSPACE CONFIGURATION
-echo =======================
-echo The workspace is the folder that will be accessible to the MCP tools.
-echo All your projects inside this folder will be available.
-echo.
-echo Suggested workspace: %WORKSPACE_PATH%
-echo.
-set /p "CUSTOM_PATH=Enter workspace path (or press Enter to accept): "
-if not "%CUSTOM_PATH%"=="" set "WORKSPACE_PATH=%CUSTOM_PATH%"
-
-:: Validate path exists
-if not exist "%WORKSPACE_PATH%" (
-    echo.
-    echo WARNING: Path does not exist: %WORKSPACE_PATH%
-    echo Creating directory...
-    mkdir "%WORKSPACE_PATH%"
+if "%CHOICE%"=="" set "CHOICE=1"
+if "%CHOICE%"=="1" (
+    set "WORKSPACE_PATH=C:/"
+    set "DOCKER_PATH=C:/"
+) else if "%CHOICE%"=="2" (
+    set "WORKSPACE_PATH=%USERPROFILE%"
+    set "DOCKER_PATH=%USERPROFILE:\=/%"
+) else if "%CHOICE%"=="3" (
+    set /p "CUSTOM_PATH=Enter full path: "
+    set "WORKSPACE_PATH=!CUSTOM_PATH!"
+    set "DOCKER_PATH=!CUSTOM_PATH:\=/!"
+) else (
+    set "WORKSPACE_PATH=C:/"
+    set "DOCKER_PATH=C:/"
 )
-
-:: Convert backslashes to forward slashes for Docker
-set "DOCKER_PATH=%WORKSPACE_PATH:\=/%"
 
 :: Config file location
 set "CONFIG_DIR=%USERPROFILE%\.cursor"
@@ -98,10 +101,13 @@ echo ==============================================
 echo.
 echo Configuration: %CONFIG_FILE%
 echo Workspace:     %WORKSPACE_PATH%
-echo Docker path:   %DOCKER_PATH%:/workspace
 echo.
-echo IMPORTANT: Your projects should be inside: %WORKSPACE_PATH%
-echo            They will be accessible at: /workspace/[project-name]
+if "%CHOICE%"=="1" (
+    echo Access: FULL DRIVE - All files on C: are accessible
+    echo Example: C:\projects\myapp = /workspace/projects/myapp
+) else (
+    echo Access: %WORKSPACE_PATH%
+)
 echo.
 echo Next steps:
 echo   1. Restart Cursor IDE
