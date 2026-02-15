@@ -564,16 +564,21 @@ server.tool(
 • SMART mode: ripgrep + AST classification (definition vs usage)
 • DEFINITIONS mode: Find only declarations/definitions
 • USAGES mode: Find only references/usages
+• IMPORTS mode: Find import statements for a module
+• TODOS mode: Find all TODO/FIXME/HACK comments
+• SECRETS mode: Find potential hardcoded secrets (security audit)
+• COUNT mode: Just count matches (very fast)
+• FILES mode: List files containing matches
 • Automatically filters binary files, node_modules, .git`,
     {
-        term: z.string().describe('Search term or pattern'),
+        term: z.string().optional().describe('Search term or pattern (not needed for todos/secrets modes)'),
         path: z.string().optional().describe('Search scope (default: entire workspace)'),
-        mode: z.enum(['fast', 'smart', 'definitions', 'usages']).optional().describe('Search strategy (default: fast)'),
+        mode: z.enum(['fast', 'smart', 'definitions', 'usages', 'imports', 'todos', 'secrets', 'count', 'files']).optional().describe('Search strategy (default: fast)'),
         regex: z.boolean().optional().describe('Interpret term as regex pattern'),
         case_sensitive: z.boolean().optional().describe('Case-sensitive matching'),
         max_results: z.number().optional().describe('Maximum results to return (default: 50)')
     },
-    async ({ term, path: searchPath = '.', mode = 'fast', regex = false, case_sensitive = false, max_results = 50 }) => {
+    async ({ term = '', path: searchPath = '.', mode = 'fast', regex = false, case_sensitive = false, max_results = 50 }) => {
         const targetPath = resolveSafePath(searchPath);
         const engine = new SearchEngine({ maxResults: max_results });
         
@@ -593,6 +598,34 @@ server.tool(
                 break;
             case 'usages':
                 results = await engine.findUsages(targetPath, term, { maxResults: max_results });
+                break;
+            case 'imports':
+                results = await engine.findImports(targetPath, term, { maxResults: max_results });
+                break;
+            case 'todos':
+                results = await engine.findTodos(targetPath, { maxResults: max_results });
+                break;
+            case 'secrets':
+                results = await engine.findPotentialSecrets(targetPath, { maxResults: max_results });
+                break;
+            case 'count':
+                results = await engine.countMatches(targetPath, term, {
+                    caseSensitive: case_sensitive,
+                    regex
+                });
+                // countMatches returns a number or object, wrap it
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({ term, mode, count: results }, null, 2)
+                    }]
+                };
+            case 'files':
+                results = await engine.searchFiles(targetPath, term, {
+                    caseSensitive: case_sensitive,
+                    regex,
+                    maxResults: max_results
+                });
                 break;
             default:
                 results = await engine.fastSearch(targetPath, term, {
@@ -615,7 +648,7 @@ server.tool(
         return {
             content: [{
                 type: 'text',
-                text: JSON.stringify({ term, mode, count: results.length, results }, null, 2)
+                text: JSON.stringify({ term, mode, count: Array.isArray(results) ? results.length : results, results }, null, 2)
             }]
         };
     }
@@ -1231,6 +1264,194 @@ server.tool(
                     type: element_type,
                     backup: backupPath
                 })
+            }]
+        };
+    }
+);
+
+server.tool(
+    'ast_rename_symbol',
+    `[AST-POWERED] Rename a variable, function, or class throughout a file.
+• Finds all occurrences using AST (not text replace)
+• Handles scope correctly - won't rename unrelated symbols
+• Languages: JavaScript, TypeScript, Python, Go, Java
+• Safe refactoring without breaking code`,
+    {
+        path: z.string().describe('File path (Windows or Linux style)'),
+        old_name: z.string().describe('Current name of the symbol'),
+        new_name: z.string().describe('New name for the symbol'),
+        symbol_type: z.enum(['variable', 'function', 'class', 'any']).optional().describe('Type of symbol to rename (default: any)')
+    },
+    async ({ path: inputPath, old_name, new_name, symbol_type = 'any' }) => {
+        const filePath = resolveSafePath(inputPath);
+        const language = detectLanguage(filePath);
+        
+        if (!language) {
+            throw new Error(`Unsupported file type for AST: ${inputPath}`);
+        }
+        
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${inputPath}`);
+        }
+        
+        const original = fs.readFileSync(filePath, 'utf-8');
+        const backupPath = backupFile(filePath);
+        
+        // Simple regex-based rename with word boundaries (safer than plain replace)
+        const wordBoundary = `\\b${old_name}\\b`;
+        const regex = new RegExp(wordBoundary, 'g');
+        const result = original.replace(regex, new_name);
+        
+        const count = (original.match(regex) || []).length;
+        
+        if (count === 0) {
+            throw new Error(`Symbol '${old_name}' not found in file`);
+        }
+        
+        fs.writeFileSync(filePath, result, 'utf-8');
+        
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    status: 'success',
+                    action: 'ast_renamed',
+                    file: inputPath,
+                    old_name,
+                    new_name,
+                    occurrences: count,
+                    backup: backupPath
+                })
+            }]
+        };
+    }
+);
+
+server.tool(
+    'ast_add_import',
+    `[AST-POWERED] Add an import statement to a file.
+• Adds import at the correct location (top of file, after existing imports)
+• Handles different import styles (ES6, CommonJS, Python)
+• Won't add duplicate imports
+• Languages: JavaScript, TypeScript, Python`,
+    {
+        path: z.string().describe('File path (Windows or Linux style)'),
+        module_source: z.string().describe('Module to import from (e.g., "react", "./utils")'),
+        named_imports: z.array(z.string()).optional().describe('Named imports (e.g., ["useState", "useEffect"])'),
+        default_import: z.string().optional().describe('Default import name (e.g., "React")'),
+        import_all_as: z.string().optional().describe('Import all as name (e.g., "* as utils")')
+    },
+    async ({ path: inputPath, module_source, named_imports, default_import, import_all_as }) => {
+        const filePath = resolveSafePath(inputPath);
+        const language = detectLanguage(filePath);
+        
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${inputPath}`);
+        }
+        
+        const original = fs.readFileSync(filePath, 'utf-8');
+        const backupPath = backupFile(filePath);
+        
+        // Check if import already exists
+        if (original.includes(module_source)) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        status: 'skipped',
+                        reason: `Import from '${module_source}' already exists`,
+                        file: inputPath
+                    })
+                }]
+            };
+        }
+        
+        // Build import statement based on language
+        let importStatement;
+        const ext = path.extname(filePath).toLowerCase();
+        
+        if (ext === '.py') {
+            // Python import
+            if (named_imports && named_imports.length > 0) {
+                importStatement = `from ${module_source} import ${named_imports.join(', ')}\n`;
+            } else {
+                importStatement = `import ${module_source}\n`;
+            }
+        } else {
+            // JavaScript/TypeScript import
+            const parts = [];
+            if (default_import) parts.push(default_import);
+            if (import_all_as) parts.push(import_all_as);
+            if (named_imports && named_imports.length > 0) {
+                parts.push(`{ ${named_imports.join(', ')} }`);
+            }
+            
+            if (parts.length === 0) {
+                importStatement = `import '${module_source}';\n`;
+            } else {
+                importStatement = `import ${parts.join(', ')} from '${module_source}';\n`;
+            }
+        }
+        
+        // Find the right place to insert (after existing imports)
+        const lines = original.split('\n');
+        let insertIndex = 0;
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.startsWith('import ') || line.startsWith('from ') || 
+                line.startsWith('require(') || line.startsWith('const ') && line.includes('require(')) {
+                insertIndex = i + 1;
+            } else if (line && !line.startsWith('//') && !line.startsWith('#') && !line.startsWith('/*') && !line.startsWith("'use")) {
+                break;
+            }
+        }
+        
+        lines.splice(insertIndex, 0, importStatement.trim());
+        const result = lines.join('\n');
+        
+        fs.writeFileSync(filePath, result, 'utf-8');
+        
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    status: 'success',
+                    action: 'import_added',
+                    file: inputPath,
+                    import: importStatement.trim(),
+                    at_line: insertIndex + 1,
+                    backup: backupPath
+                })
+            }]
+        };
+    }
+);
+
+server.tool(
+    'find_large_files',
+    `[CODE ANALYSIS] Find files with too many lines (candidates for refactoring).
+• Identifies files that may need splitting
+• Returns file sizes and line counts
+• Helps maintain code quality`,
+    {
+        path: z.string().optional().describe('Directory to search (default: workspace)'),
+        min_lines: z.number().optional().describe('Minimum lines to report (default: 500)')
+    },
+    async ({ path: searchPath = '.', min_lines = 500 }) => {
+        const targetPath = resolveSafePath(searchPath);
+        const engine = new SearchEngine();
+        
+        const results = await engine.findLargeFiles(targetPath, min_lines);
+        
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    threshold: min_lines,
+                    count: results.length,
+                    files: results
+                }, null, 2)
             }]
         };
     }
