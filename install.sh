@@ -49,7 +49,16 @@ curl -fsSL "$REPO_URL/CodeLinter.js" -o CodeLinter.js
 curl -fsSL "$REPO_URL/CodeAnalyzer.js" -o CodeAnalyzer.js
 curl -fsSL "$REPO_URL/diff-tool.js" -o diff-tool.js
 
-echo -e "${GREEN}[OK]${NC} Files downloaded"
+echo -e "${GREEN}[OK]${NC} Server files downloaded"
+
+# Download AI Skill (professional workflow guide)
+echo "Installing AI Skill..."
+SKILL_DIR="$HOME/.cursor/skills/token-efficient-dev"
+mkdir -p "$SKILL_DIR"
+curl -fsSL "$REPO_URL/skill/SKILL.md" -o "$SKILL_DIR/SKILL.md"
+curl -fsSL "$REPO_URL/skill/tool-reference.md" -o "$SKILL_DIR/tool-reference.md"
+curl -fsSL "$REPO_URL/skill/examples.md" -o "$SKILL_DIR/examples.md"
+echo -e "${GREEN}[OK]${NC} AI Skill installed"
 
 # Build Docker image
 echo ""
@@ -90,9 +99,15 @@ echo "=============================================="
 echo -e "  ${GREEN}Installation Complete!${NC}"
 echo "=============================================="
 echo ""
-echo "Config: $CONFIG_FILE"
+echo "Installed:"
+echo "  - MCP Server: Docker image 'code-contractor-mcp'"
+echo "  - Config: $CONFIG_FILE"
+echo "  - AI Skill: $SKILL_DIR"
+echo ""
+echo -e "${YELLOW}What's included:${NC}"
+echo "  - 20+ token-efficient tools (AST, search, smart patching)"
+echo "  - Professional workflow guide for AI"
+echo "  - 80%+ token savings vs traditional approach"
 echo ""
 echo -e "${YELLOW}Next step:${NC} Restart Cursor IDE"
-echo ""
-echo "Verify: docker run --rm code-contractor-mcp node -e \"console.log('OK')\""
 echo ""

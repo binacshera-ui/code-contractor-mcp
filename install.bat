@@ -50,8 +50,14 @@ echo.
 echo [OK] Docker image built successfully
 echo.
 
-:: Note: Bridge uses only built-in Node.js modules, no npm install needed
-echo [OK] Bridge requires no additional dependencies
+:: Install AI Skill (professional workflow guide)
+echo Installing AI Skill...
+set "SKILL_DIR=%USERPROFILE%\.cursor\skills\token-efficient-dev"
+if not exist "%SKILL_DIR%" mkdir "%SKILL_DIR%"
+copy "%SCRIPT_DIR%\skill\SKILL.md" "%SKILL_DIR%\" >nul
+copy "%SCRIPT_DIR%\skill\tool-reference.md" "%SKILL_DIR%\" >nul
+copy "%SCRIPT_DIR%\skill\examples.md" "%SKILL_DIR%\" >nul
+echo [OK] AI Skill installed
 echo.
 
 :: Get current directory for bridge path
@@ -105,23 +111,22 @@ echo ==============================================
 echo   Installation Complete!
 echo ==============================================
 echo.
-echo Configuration: %CONFIG_FILE%
-echo Bridge Script: %BRIDGE_SCRIPT%
+echo Installed:
+echo   - MCP Server: Docker image 'code-contractor-mcp'
+echo   - Config: %CONFIG_FILE%
+echo   - Bridge: %BRIDGE_SCRIPT%
+echo   - AI Skill: %SKILL_DIR%
 echo.
-echo IMPORTANT - New Bridge Architecture:
-echo   - The Bridge runs on YOUR machine (not in Docker)
-echo   - It handles all file operations with YOUR permissions
-echo   - Works with local files AND remote SSH connections!
+echo What's included:
+echo   - 20+ token-efficient tools (AST, search, smart patching)
+echo   - Professional workflow guide for AI
+echo   - 80%+ token savings vs traditional approach
 echo.
 echo Next steps:
 echo   1. Start the bridge: "%BRIDGE_SCRIPT%"
 echo      (Or it will auto-start on next Windows login)
 echo   2. Restart Cursor IDE
 echo   3. The MCP tools will be available automatically
-echo.
-echo To verify:
-echo   - Bridge: curl http://localhost:9111 -d "{\"operation\":\"ping\"}"
-echo   - Docker: docker run --rm code-contractor-mcp node -e "console.log('OK')"
 echo.
 
 :: Ask to start bridge now
