@@ -50,10 +50,8 @@ echo.
 echo [OK] Docker image built successfully
 echo.
 
-:: Install Node dependencies for bridge
-echo Installing bridge dependencies...
-call npm install
-echo [OK] Dependencies installed
+:: Note: Bridge uses only built-in Node.js modules, no npm install needed
+echo [OK] Bridge requires no additional dependencies
 echo.
 
 :: Get current directory for bridge path

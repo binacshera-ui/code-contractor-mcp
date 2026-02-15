@@ -51,10 +51,8 @@ echo ""
 echo -e "${GREEN}[OK]${NC} Docker image built successfully"
 echo ""
 
-# Install Node dependencies for bridge
-echo "Installing bridge dependencies..."
-npm install
-echo -e "${GREEN}[OK]${NC} Dependencies installed"
+# Note: Bridge uses only built-in Node.js modules, no npm install needed
+echo -e "${GREEN}[OK]${NC} Bridge requires no additional dependencies"
 echo ""
 
 # Config file location
