@@ -33,11 +33,6 @@ for arg in "$@"; do
     esac
 done
 
-# Check if running interactively (not piped)
-IS_INTERACTIVE=false
-if [ -t 0 ]; then
-    IS_INTERACTIVE=true
-fi
 
 # Check Docker
 echo "Checking Docker..."
@@ -80,13 +75,21 @@ if [ -n "$IMAGE_EXISTS" ] || [ "$CONFIG_EXISTS" = true ]; then
             docker rmi code-contractor-mcp -f 2>/dev/null || true
         fi
         echo -e "${GREEN}[OK]${NC} Old installation cleaned"
-    elif [ "$IS_INTERACTIVE" = true ]; then
-        # Interactive mode - ask user
+    else
+        # Try to read from /dev/tty (works even when piped)
         echo "Options:"
         echo "  1) Update (reinstall with latest version)"
         echo "  2) Cancel"
         echo ""
-        read -p "Choose [1/2]: " choice
+        
+        if [ -e /dev/tty ]; then
+            read -p "Choose [1/2]: " choice < /dev/tty
+        else
+            echo -e "${RED}Cannot prompt - no TTY available.${NC}"
+            echo "To update, run with --force:"
+            echo -e "  ${GREEN}curl -fsSL ...install.sh | bash -s -- --force${NC}"
+            exit 1
+        fi
         
         case $choice in
             1|u|U|update|Update)
@@ -109,14 +112,6 @@ if [ -n "$IMAGE_EXISTS" ] || [ "$CONFIG_EXISTS" = true ]; then
                 exit 0
                 ;;
         esac
-    else
-        # Non-interactive (piped) - show instructions
-        echo -e "${RED}Cannot prompt in pipe mode.${NC}"
-        echo ""
-        echo "To update, run:"
-        echo -e "  ${GREEN}curl -fsSL https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/install.sh | bash -s -- --force${NC}"
-        echo ""
-        exit 1
     fi
     echo ""
 fi
