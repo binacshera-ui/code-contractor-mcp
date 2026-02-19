@@ -1,11 +1,12 @@
 #!/bin/bash
 #
 # Code Contractor MCP Server - One-Line Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/install.sh | bash
 #
-# Options:
-#   --force    Force reinstall even if already installed
-#   --update   Same as --force (update existing installation)
+# Fresh install:
+#   curl -fsSL https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/install.sh | bash
+#
+# Update existing installation:
+#   curl -fsSL https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/install.sh | bash -s -- --force
 #
 
 set -e
@@ -31,6 +32,12 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Check if running interactively (not piped)
+IS_INTERACTIVE=false
+if [ -t 0 ]; then
+    IS_INTERACTIVE=true
+fi
 
 # Check Docker
 echo "Checking Docker..."
@@ -61,7 +68,7 @@ if [ -n "$IMAGE_EXISTS" ] || [ "$CONFIG_EXISTS" = true ]; then
     echo ""
     
     if [ "$FORCE_INSTALL" = true ]; then
-        echo -e "${BLUE}Force mode enabled - updating installation...${NC}"
+        echo -e "${BLUE}Updating installation...${NC}"
         
         # Stop any running containers
         echo "Stopping running containers..."
@@ -73,7 +80,8 @@ if [ -n "$IMAGE_EXISTS" ] || [ "$CONFIG_EXISTS" = true ]; then
             docker rmi code-contractor-mcp -f 2>/dev/null || true
         fi
         echo -e "${GREEN}[OK]${NC} Old installation cleaned"
-    else
+    elif [ "$IS_INTERACTIVE" = true ]; then
+        # Interactive mode - ask user
         echo "Options:"
         echo "  1) Update (reinstall with latest version)"
         echo "  2) Cancel"
@@ -101,6 +109,14 @@ if [ -n "$IMAGE_EXISTS" ] || [ "$CONFIG_EXISTS" = true ]; then
                 exit 0
                 ;;
         esac
+    else
+        # Non-interactive (piped) - show instructions
+        echo -e "${RED}Cannot prompt in pipe mode.${NC}"
+        echo ""
+        echo "To update, run:"
+        echo -e "  ${GREEN}curl -fsSL https://raw.githubusercontent.com/binacshera-ui/code-contractor-mcp/main/install.sh | bash -s -- --force${NC}"
+        echo ""
+        exit 1
     fi
     echo ""
 fi
