@@ -345,6 +345,12 @@ const server = new McpServer({
 server.tool(
     'get_file_outline',
     `[AST-POWERED] Get function/class definitions in file (X-ray view).
+
+REQUIRED PARAMETER:
+• path: string - File path (e.g., "src/utils.js" or "/host/home/user/project/file.ts")
+
+Example: { "path": "src/components/Button.tsx" }
+
 ⭐ PRIORITY 1 FOR READING - Use FIRST before reading any file!
 • Returns ONLY structure (names, types, line numbers) - saves 90%+ tokens
 • Use this to find what you need, then extract_code_element for details
@@ -392,6 +398,14 @@ server.tool(
 server.tool(
     'extract_code_element',
     `[AST-POWERED] Extract specific function/class/variable with surrounding context.
+
+REQUIRED PARAMETERS (all 3 must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• element_name: string - Name of function/class/variable to extract
+• element_type: string - One of: "function", "class", "variable", "interface", "type", "method", "enum"
+
+Example: { "path": "src/utils.js", "element_name": "processData", "element_type": "function" }
+
 ⭐ PRIORITY 2 FOR READING - Use after get_file_outline to read specific code
 • Returns ONLY the requested element - not entire file!
 • Typical workflow: get_file_outline → find function → extract_code_element
@@ -434,6 +448,17 @@ server.tool(
 server.tool(
     'search_code',
     `[RIPGREP + AST] Advanced code search with semantic understanding.
+
+REQUIRED PARAMETERS:
+• query: string - Search pattern (regex supported)
+• directory: string - Directory to search (e.g., "src" or ".")
+
+OPTIONAL PARAMETERS:
+• mode: string - "smart" (default), "definitions", "usages", "imports", "todos", "secrets"
+• file_pattern: string - Glob pattern (e.g., "*.ts")
+
+Example: { "query": "processData", "directory": "src", "mode": "definitions" }
+
 • SMART mode: ripgrep + AST classification (definition vs usage)
 • DEFINITIONS mode: Find only declarations/definitions
 • USAGES mode: Find only references/usages
@@ -718,14 +743,25 @@ server.tool(
 
 server.tool(
     'replace_exact_line',
-    `⚠️ PRIORITY 6 - Use only for single config line changes
-• Risky: must match entire line exactly (whitespace matters!)
-• Consider: insert_at_line or ast_replace_element instead
-• Automatic backup before change`,
+    `Replace a single line in a file by exact match.
+
+REQUIRED PARAMETERS (all 3 must be provided):
+• path: string - File path (e.g., "src/config.js")
+• line_to_find: string - The EXACT complete line to find (whitespace matters!)
+• replacement_line: string - The new line to replace it with
+
+Example call:
+{
+  "path": "src/config.js",
+  "line_to_find": "const DEBUG = false;",
+  "replacement_line": "const DEBUG = true;"
+}
+
+⚠️ PRIORITY 6 - Consider ast_replace_element or insert_at_line instead`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        line_to_find: z.string().describe('Complete line to find (exact match required)'),
-        replacement_line: z.string().describe('Complete replacement line')
+        path: z.string().describe('REQUIRED: File path (e.g., "src/config.js")'),
+        line_to_find: z.string().describe('REQUIRED: Complete line to find (exact match)'),
+        replacement_line: z.string().describe('REQUIRED: Complete replacement line')
     },
     async ({ path: inputPath, line_to_find, replacement_line }) => {
         const filePath = resolveSafePath(inputPath);
@@ -768,6 +804,14 @@ server.tool(
 server.tool(
     'insert_at_line',
     `⭐ PRIORITY 3 FOR WRITING - Insert new code at line number
+
+REQUIRED PARAMETERS (all 3 must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• line_number: number - Line number where to insert (1-based)
+• content: string - Code to insert
+
+Example: { "path": "src/utils.js", "line_number": 5, "content": "import { helper } from './helper';" }
+
 • Only sends NEW code - no old code needed = saves tokens!
 • Get line number from get_file_outline first
 • Perfect for: adding imports, new functions, new methods
@@ -948,6 +992,13 @@ server.tool(
 server.tool(
     'append_to_file',
     `⭐ PRIORITY 3 FOR WRITING - Add code to END of file
+
+REQUIRED PARAMETERS (both must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• content: string - Code to append at end
+
+Example: { "path": "src/utils.js", "content": "\\nexport function newHelper() { return true; }" }
+
 • SIMPLEST tool - just sends new code, no search needed!
 • Perfect for: new functions, new exports, adding at bottom
 • No line numbers, no markers, no old code = minimal tokens
@@ -977,6 +1028,13 @@ server.tool(
 server.tool(
     'prepend_to_file',
     `⭐ PRIORITY 3 FOR WRITING - Add code to START of file
+
+REQUIRED PARAMETERS (both must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• content: string - Code to prepend at start
+
+Example: { "path": "src/utils.js", "content": "// Copyright 2024\\n" }
+
 • SIMPLEST tool - just sends new code!
 • Perfect for: imports, headers, license text
 • Consider ast_add_import for smarter import handling
@@ -1005,14 +1063,22 @@ server.tool(
 
 server.tool(
     'apply_diff',
-    `⚠️ PRIORITY 8 - Diff requires context lines = more tokens
-• Better alternatives: ast_replace_element, insert_at_line
-• Use only when you already have a diff from somewhere
-• Needs: old lines + new lines + context = high token cost
-• Fails if file changed since diff was created`,
+    `Apply a unified diff patch to a file.
+
+REQUIRED PARAMETERS (both must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• diff_content: string - Unified diff with --- +++ @@ headers
+
+Example call:
+{
+  "path": "src/utils.js",
+  "diff_content": "--- a/src/utils.js\\n+++ b/src/utils.js\\n@@ -10,3 +10,4 @@\\n function old() {\\n+  // new line\\n }"
+}
+
+⚠️ PRIORITY 8 - Consider ast_replace_element or insert_at_line instead (less tokens)`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        diff_content: z.string().describe('Unified diff content (with --- +++ @@ headers)')
+        path: z.string().describe('REQUIRED: File path (e.g., "src/utils.js")'),
+        diff_content: z.string().describe('REQUIRED: Unified diff content with --- +++ @@ headers')
     },
     async ({ path: inputPath, diff_content }) => {
         const filePath = resolveSafePath(inputPath);
@@ -1057,8 +1123,22 @@ server.tool(
 server.tool(
     'ast_replace_element',
     `🏆 PRIORITY 1 FOR WRITING - Replace function/class by NAME
+
+REQUIRED PARAMETERS (all 4 must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• element_name: string - Name of the function/class to replace
+• element_type: string - One of: "function", "class", "interface", "type", "method"
+• new_code: string - Complete new implementation
+
+Example:
+{
+  "path": "src/utils.js",
+  "element_name": "processData",
+  "element_type": "function",
+  "new_code": "function processData(input) {\\n  return input.trim();\\n}"
+}
+
 • BEST tool for modifying existing code!
-• Just send: function name + new implementation
 • No old code needed, no line numbers, no markers!
 • AST finds the function automatically = safest method
 • Languages: JavaScript, TypeScript, Python, Go, Java`,
