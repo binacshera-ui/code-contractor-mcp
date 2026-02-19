@@ -259,17 +259,27 @@ function resolveSafePath(inputPath) {
     }
     
     // MODE 3: Docker-only with workspace mount (legacy)
-    if (!normalizedPath.startsWith('/')) {
-        normalizedPath = '/' + normalizedPath;
+    // For relative paths, join with workspace root
+    // For absolute paths, check if they're within workspace
+    if (normalizedPath.startsWith('/')) {
+        // Absolute path - check if it's meant to be relative to workspace
+        if (!normalizedPath.startsWith(WORKSPACE_ROOT)) {
+            // Treat as relative path by stripping leading /
+            normalizedPath = normalizedPath.substring(1);
+        }
     }
     
-    const resolved = path.resolve(WORKSPACE_ROOT, normalizedPath);
+    const resolved = path.join(WORKSPACE_ROOT, normalizedPath);
     
-    if (!resolved.startsWith(WORKSPACE_ROOT)) {
+    // Security check: ensure we're still within workspace
+    const realResolved = path.resolve(resolved);
+    const realWorkspace = path.resolve(WORKSPACE_ROOT);
+    
+    if (!realResolved.startsWith(realWorkspace)) {
         throw new Error(`Security: Path '${inputPath}' is outside workspace.`);
     }
     
-    return resolved;
+    return realResolved;
 }
 
 function backupFile(filePath) {
@@ -355,73 +365,23 @@ server.tool(
         const content = await bridge.readFile(filePath);
         const language = detectLanguage(filePath);
         
-        if (!language) {
-            // Regex fallback
-            const lines = content.split('\n');
-            const outline = [];
-            const patterns = [
-                /^(?:export\s+)?(?:async\s+)?function\s+(\w+)/,
-                /^(?:export\s+)?class\s+(\w+)/,
-                /^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(/,
-                /^def\s+(\w+)/,
-                /^class\s+(\w+)/,
-                /^func\s+(\w+)/
-            ];
-            
-            lines.forEach((line, idx) => {
-                const trimmed = line.trim();
-                for (const pattern of patterns) {
-                    const match = trimmed.match(pattern);
-                    if (match) {
-                        outline.push({ line: idx + 1, name: match[1], signature: trimmed.split('{')[0].trim() });
-                        break;
-                    }
-                }
-            });
-            
-            return { content: [{ type: 'text', text: JSON.stringify({ file: inputPath, outline }) }] };
-        }
-        
         try {
-            const analyzer = new CodeAnalyzer(language);
-            const tree = analyzer.parse(content);
-            const lines = content.split('\n');
-            const outline = [];
+            // Use CodeAnalyzer's comprehensive getOutline method
+            // Works with AST when available, falls back to regex otherwise
+            const analyzer = new CodeAnalyzer(language || 'unknown', filePath);
+            const outline = analyzer.getOutline(content);
             
-            const definitionTypes = [
-                'function_declaration', 'function_definition',
-                'class_declaration', 'class_definition',
-                'method_definition'
-            ];
-            
-            const collectDefs = (node) => {
-                if (!node) return;
-                
-                if (definitionTypes.includes(node.type)) {
-                    // tree-sitter 0.20.x uses properties like nameNode, idNode instead of childForFieldName
-                    const nameNode = node.nameNode || 
-                                     node.idNode ||
-                                     (node.namedChildCount > 0 && 
-                                      node.namedChild(0)?.type === 'identifier' ? node.namedChild(0) : null) ||
-                                     (node.namedChildCount > 0 && 
-                                      node.namedChild(0)?.type === 'property_identifier' ? node.namedChild(0) : null);
-                    
-                    const name = nameNode ? nameNode.text : '(anonymous)';
-                    outline.push({
-                        type: node.type.replace('_declaration', '').replace('_definition', ''),
-                        name,
-                        line: node.startPosition.row + 1,
-                        signature: lines[node.startPosition.row]?.trim().split('{')[0].trim()
-                    });
-                }
-                for (let i = 0; i < node.childCount; i++) {
-                    const child = node.child(i);
-                    if (child) collectDefs(child);
-                }
+            return { 
+                content: [{ 
+                    type: 'text', 
+                    text: JSON.stringify({ 
+                        file: inputPath, 
+                        language: language || 'unknown',
+                        count: outline.length,
+                        outline 
+                    }, null, 2) 
+                }] 
             };
-            
-            collectDefs(tree.rootNode);
-            return { content: [{ type: 'text', text: JSON.stringify({ file: inputPath, language, outline }) }] };
             
         } catch (e) {
             return { content: [{ type: 'text', text: JSON.stringify({ file: inputPath, error: e.message }) }] };
@@ -440,28 +400,25 @@ server.tool(
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         element_name: z.string().describe('Name of function/class/variable to extract'),
-        type: z.enum(['function', 'class', 'variable']).describe('Type of code element'),
+        type: z.enum(['function', 'class', 'variable', 'interface', 'type', 'method', 'enum']).describe('Type of code element'),
         context_lines: z.number().optional().describe('Lines of context around element (default: 5)')
     },
     async ({ path: inputPath, element_name, type, context_lines = 5 }) => {
         const filePath = resolveSafePath(inputPath);
         const language = detectLanguage(filePath);
         
-        if (!language) {
-            throw new Error(`Unsupported file type for AST: ${inputPath}`);
-        }
-        
         // Use Bridge for file access (supports remote files)
         const content = await bridge.readFile(filePath);
         
         try {
-            const analyzer = new CodeAnalyzer(language);
+            // CodeAnalyzer now works with regex fallback even without AST support
+            const analyzer = new CodeAnalyzer(language || 'unknown', filePath);
             const results = analyzer.extractElement(content, element_name, type, context_lines);
             
             return {
                 content: [{
                     type: 'text',
-                    text: JSON.stringify({ file: inputPath, element: element_name, results })
+                    text: JSON.stringify({ file: inputPath, element: element_name, type, results }, null, 2)
                 }]
             };
         } catch (e) {
@@ -1108,16 +1065,12 @@ server.tool(
     {
         path: z.string().describe('File path (Windows or Linux style)'),
         element_name: z.string().describe('Name of function or class to replace'),
-        element_type: z.enum(['function', 'class']).describe('Type of element'),
+        element_type: z.enum(['function', 'class', 'interface', 'type', 'method']).describe('Type of element'),
         new_content: z.string().describe('Complete new implementation')
     },
     async ({ path: inputPath, element_name, element_type, new_content }) => {
         const filePath = resolveSafePath(inputPath);
         const language = detectLanguage(filePath);
-        
-        if (!language) {
-            throw new Error(`Unsupported file type for AST: ${inputPath}`);
-        }
         
         const exists = await bridge.exists(filePath);
         if (!exists) {
