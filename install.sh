@@ -36,17 +36,125 @@ done
 
 # Check Docker
 echo "Checking Docker..."
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}ERROR: Docker is not installed.${NC}"
-    echo "Install Docker: curl -fsSL https://get.docker.com | sh"
-    exit 1
+
+DOCKER_INSTALLED=false
+DOCKER_RUNNING=false
+
+# Check if Docker is installed
+if command -v docker &> /dev/null; then
+    DOCKER_INSTALLED=true
 fi
 
-if ! docker info &> /dev/null 2>&1; then
-    echo -e "${RED}ERROR: Docker is not running.${NC}"
-    exit 1
+if [ "$DOCKER_INSTALLED" = false ]; then
+    echo -e "${YELLOW}[!] Docker not installed${NC}"
+    echo ""
+    echo -e "${BLUE}Installing Docker...${NC}"
+    
+    # Detect OS and install Docker
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+    else
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    fi
+    
+    # Install Docker using official script
+    echo "  Downloading and running Docker installer..."
+    if curl -fsSL https://get.docker.com | sh; then
+        echo -e "${GREEN}[OK]${NC} Docker installed"
+        
+        # Add current user to docker group (if not root)
+        if [ "$EUID" -ne 0 ] && [ -n "$USER" ]; then
+            echo "  Adding $USER to docker group..."
+            sudo usermod -aG docker "$USER" 2>/dev/null || true
+            echo -e "${YELLOW}NOTE: You may need to log out and log back in for group changes to take effect${NC}"
+        fi
+        
+        # Start Docker service
+        echo "  Starting Docker service..."
+        if command -v systemctl &> /dev/null; then
+            sudo systemctl start docker 2>/dev/null || true
+            sudo systemctl enable docker 2>/dev/null || true
+        elif command -v service &> /dev/null; then
+            sudo service docker start 2>/dev/null || true
+        fi
+        
+        DOCKER_INSTALLED=true
+        
+        # Wait for Docker to be ready
+        echo "  Waiting for Docker to initialize..."
+        sleep 5
+    else
+        echo -e "${RED}[ERROR] Failed to install Docker${NC}"
+        echo "Please install Docker manually: https://docs.docker.com/engine/install/"
+        exit 1
+    fi
 fi
-echo -e "${GREEN}[OK]${NC} Docker is ready"
+
+# Check if Docker daemon is running
+if docker info &> /dev/null 2>&1; then
+    DOCKER_RUNNING=true
+fi
+
+if [ "$DOCKER_RUNNING" = false ]; then
+    echo -e "${YELLOW}[!] Docker daemon not running - starting it...${NC}"
+    
+    # Try to start Docker
+    STARTED=false
+    
+    # Try systemctl (most modern Linux)
+    if command -v systemctl &> /dev/null; then
+        echo "  Starting Docker via systemctl..."
+        if sudo systemctl start docker 2>/dev/null; then
+            STARTED=true
+        fi
+    fi
+    
+    # Try service command (older systems)
+    if [ "$STARTED" = false ] && command -v service &> /dev/null; then
+        echo "  Starting Docker via service..."
+        if sudo service docker start 2>/dev/null; then
+            STARTED=true
+        fi
+    fi
+    
+    if [ "$STARTED" = true ]; then
+        echo "  Waiting for Docker to be ready..."
+        
+        MAX_WAIT=60
+        WAITED=0
+        
+        while [ $WAITED -lt $MAX_WAIT ]; do
+            sleep 3
+            WAITED=$((WAITED + 3))
+            
+            if docker info &> /dev/null 2>&1; then
+                DOCKER_RUNNING=true
+                break
+            fi
+            
+            echo "  Still waiting... ($WAITED/$MAX_WAIT seconds)"
+        done
+        
+        if [ "$DOCKER_RUNNING" = true ]; then
+            echo -e "${GREEN}[OK]${NC} Docker is ready"
+        else
+            echo -e "${RED}[ERROR] Docker failed to start within $MAX_WAIT seconds${NC}"
+            echo "Please start Docker manually and run this script again"
+            exit 1
+        fi
+    else
+        echo -e "${RED}[ERROR] Could not start Docker daemon${NC}"
+        echo "Please start Docker manually:"
+        echo "  sudo systemctl start docker"
+        echo "  OR"
+        echo "  sudo service docker start"
+        exit 1
+    fi
+else
+    DOCKER_VERSION=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
+    echo -e "${GREEN}[OK]${NC} Docker is ready (v$DOCKER_VERSION)"
+fi
 
 # Check if already installed
 IMAGE_EXISTS=$(docker images -q code-contractor-mcp 2>/dev/null)
