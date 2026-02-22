@@ -21,20 +21,134 @@ $ForceUpdate = $env:FORCE_UPDATE -eq "true"
 
 # Check Docker
 Write-Host "Checking Docker..." -ForegroundColor Yellow
+
+$dockerInstalled = $false
+$dockerRunning = $false
+
+# Check if Docker is installed
+try {
+    $dockerPath = Get-Command docker -ErrorAction SilentlyContinue
+    if ($dockerPath) {
+        $dockerInstalled = $true
+    }
+} catch {}
+
+if (-not $dockerInstalled) {
+    Write-Host "[!] Docker Desktop not installed" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Installing Docker Desktop..." -ForegroundColor Cyan
+    
+    # Download Docker Desktop installer
+    $dockerInstaller = "$env:TEMP\DockerDesktopInstaller.exe"
+    Write-Host "  Downloading Docker Desktop (this may take a few minutes)..." -ForegroundColor Gray
+    
+    try {
+        Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" -OutFile $dockerInstaller -UseBasicParsing
+        
+        Write-Host "  Running installer (follow the prompts)..." -ForegroundColor Gray
+        Start-Process -FilePath $dockerInstaller -ArgumentList "install", "--quiet", "--accept-license" -Wait
+        
+        # Refresh PATH
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        
+        Write-Host "[OK] Docker Desktop installed" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "IMPORTANT: You may need to:" -ForegroundColor Yellow
+        Write-Host "  1. Log out and log back in (or restart computer)" -ForegroundColor Yellow
+        Write-Host "  2. Run this script again" -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Try to start Docker Desktop
+        $dockerDesktopPath = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+        if (Test-Path $dockerDesktopPath) {
+            Write-Host "Starting Docker Desktop..." -ForegroundColor Cyan
+            Start-Process $dockerDesktopPath
+            Write-Host "Waiting for Docker to initialize (60 seconds)..." -ForegroundColor Gray
+            Start-Sleep -Seconds 60
+        }
+        
+        $dockerInstalled = $true
+    } catch {
+        Write-Host "[ERROR] Failed to install Docker Desktop automatically" -ForegroundColor Red
+        Write-Host "Please install manually from: https://docker.com/products/docker-desktop" -ForegroundColor Yellow
+        exit 1
+    } finally {
+        Remove-Item $dockerInstaller -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Check if Docker is running
 try {
     $dockerVersion = docker version --format '{{.Server.Version}}' 2>$null
-    if (-not $dockerVersion) {
-        throw "Docker not responding"
+    if ($dockerVersion) {
+        $dockerRunning = $true
+        Write-Host "[OK] Docker is ready (v$dockerVersion)" -ForegroundColor Green
     }
-    Write-Host "[OK] Docker is ready (v$dockerVersion)" -ForegroundColor Green
-} catch {
-    Write-Host "[ERROR] Docker Desktop is not running!" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Please:" -ForegroundColor Yellow
-    Write-Host "  1. Install Docker Desktop from https://docker.com/products/docker-desktop"
-    Write-Host "  2. Start Docker Desktop"
-    Write-Host "  3. Run this script again"
-    exit 1
+} catch {}
+
+if (-not $dockerRunning) {
+    Write-Host "[!] Docker Desktop not running - starting it..." -ForegroundColor Yellow
+    
+    # Try to find and start Docker Desktop
+    $dockerDesktopPaths = @(
+        "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+        "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
+    )
+    
+    $started = $false
+    foreach ($path in $dockerDesktopPaths) {
+        if (Test-Path $path) {
+            Write-Host "  Starting Docker Desktop..." -ForegroundColor Gray
+            Start-Process $path
+            $started = $true
+            break
+        }
+    }
+    
+    if (-not $started) {
+        # Try via Start Menu
+        try {
+            Start-Process "Docker Desktop" -ErrorAction SilentlyContinue
+            $started = $true
+        } catch {}
+    }
+    
+    if ($started) {
+        Write-Host "  Waiting for Docker to initialize..." -ForegroundColor Gray
+        
+        # Wait for Docker to be ready (max 90 seconds)
+        $maxWait = 90
+        $waited = 0
+        $ready = $false
+        
+        while ($waited -lt $maxWait) {
+            Start-Sleep -Seconds 5
+            $waited += 5
+            
+            try {
+                $dockerVersion = docker version --format '{{.Server.Version}}' 2>$null
+                if ($dockerVersion) {
+                    $ready = $true
+                    break
+                }
+            } catch {}
+            
+            Write-Host "  Still waiting... ($waited/$maxWait seconds)" -ForegroundColor Gray
+        }
+        
+        if ($ready) {
+            Write-Host "[OK] Docker is ready (v$dockerVersion)" -ForegroundColor Green
+        } else {
+            Write-Host "[ERROR] Docker failed to start within $maxWait seconds" -ForegroundColor Red
+            Write-Host "Please start Docker Desktop manually and run this script again" -ForegroundColor Yellow
+            exit 1
+        }
+    } else {
+        Write-Host "[ERROR] Could not find Docker Desktop to start" -ForegroundColor Red
+        Write-Host "Please start Docker Desktop manually and run this script again" -ForegroundColor Yellow
+        exit 1
+    }
 }
 
 # Check if already installed
