@@ -402,9 +402,9 @@ server.tool(
 REQUIRED PARAMETERS (all 3 must be provided):
 • path: string - File path (e.g., "src/utils.js")
 • element_name: string - Name of function/class/variable to extract
-• element_type: string - One of: "function", "class", "variable", "interface", "type", "method", "enum"
+• type: string - One of: "function", "class", "variable", "interface", "type", "method", "enum"
 
-Example: { "path": "src/utils.js", "element_name": "processData", "element_type": "function" }
+Example: { "path": "src/utils.js", "element_name": "processData", "type": "function" }
 
 ⭐ PRIORITY 2 FOR READING - Use after get_file_outline to read specific code
 • Returns ONLY the requested element - not entire file!
@@ -412,10 +412,10 @@ Example: { "path": "src/utils.js", "element_name": "processData", "element_type"
 • Saves 80%+ tokens compared to reading full file
 • Languages: JavaScript, TypeScript, Python, Go, Java`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        element_name: z.string().describe('Name of function/class/variable to extract'),
-        type: z.enum(['function', 'class', 'variable', 'interface', 'type', 'method', 'enum']).describe('Type of code element'),
-        context_lines: z.number().optional().describe('Lines of context around element (default: 5)')
+        path: z.string().describe('REQUIRED: File path'),
+        element_name: z.string().describe('REQUIRED: Name of function/class/variable to extract'),
+        type: z.enum(['function', 'class', 'variable', 'interface', 'type', 'method', 'enum']).describe('REQUIRED: Type of code element'),
+        context_lines: z.number().optional().describe('Lines of context (default: 5)')
     },
     async ({ path: inputPath, element_name, type, context_lines = 5 }) => {
         const filePath = resolveSafePath(inputPath);
@@ -450,34 +450,40 @@ server.tool(
     `[RIPGREP + AST] Advanced code search with semantic understanding.
 
 REQUIRED PARAMETERS:
-• query: string - Search pattern (regex supported)
-• directory: string - Directory to search (e.g., "src" or ".")
+• term: string - Search term or pattern (e.g., "const ctx", "function.*User")
+• path: string - Directory or file to search (e.g., "src", ".", "/host/home/user/project")
 
 OPTIONAL PARAMETERS:
 • mode: string - "smart" (default), "definitions", "usages", "imports", "todos", "secrets"
-• file_pattern: string - Glob pattern (e.g., "*.ts")
+• regex: boolean - Interpret term as regex (default: false)
+• case_sensitive: boolean - Case-sensitive matching (default: false)
+• max_results: number - Maximum results (default: 50)
 
-Example: { "query": "processData", "directory": "src", "mode": "definitions" }
+Example: { "term": "processData", "path": "src", "mode": "definitions" }
+Example: { "term": "const ctx =", "path": "/host/home/user/project/main.js" }
 
-• SMART mode: ripgrep + AST classification (definition vs usage)
-• DEFINITIONS mode: Find only declarations/definitions
-• USAGES mode: Find only references/usages
-• IMPORTS mode: Find import statements for a module
-• TODOS mode: Find all TODO/FIXME/HACK comments
-• SECRETS mode: Find potential hardcoded secrets (security audit)
-• COUNT mode: Just count matches (very fast)
-• FILES mode: List files containing matches
-• Automatically filters binary files, node_modules, .git
-NOTE: For basic text search, use Cursor's built-in Grep tool`,
+MODES:
+• smart - ripgrep + AST classification (definition vs usage)
+• definitions - Find only declarations/definitions
+• usages - Find only references/usages
+• imports - Find import statements for a module
+• todos - Find all TODO/FIXME/HACK comments
+• secrets - Find potential hardcoded secrets`,
     {
-        term: z.string().optional().describe('Search term or pattern (not needed for todos/secrets modes)'),
-        path: z.string().optional().describe('Search scope (default: entire workspace)'),
-        mode: z.enum(['smart', 'definitions', 'usages', 'imports', 'todos', 'secrets', 'count', 'files']).optional().describe('Search strategy (default: smart)'),
+        term: z.string().describe('REQUIRED: Search term or pattern'),
+        path: z.string().describe('REQUIRED: Directory or file path to search'),
+        mode: z.enum(['smart', 'definitions', 'usages', 'imports', 'todos', 'secrets', 'count', 'files']).optional().describe('Search mode (default: smart)'),
         regex: z.boolean().optional().describe('Interpret term as regex pattern'),
         case_sensitive: z.boolean().optional().describe('Case-sensitive matching'),
-        max_results: z.number().optional().describe('Maximum results to return (default: 50)')
+        max_results: z.number().optional().describe('Maximum results (default: 50)')
     },
-    async ({ term = '', path: searchPath = '.', mode = 'smart', regex = false, case_sensitive = false, max_results = 50 }) => {
+    async ({ term, path: searchPath, mode = 'smart', regex = false, case_sensitive = false, max_results = 50 }) => {
+        if (!term && !['todos', 'secrets'].includes(mode)) {
+            throw new Error('Parameter "term" is required for this search mode');
+        }
+        if (!searchPath) {
+            throw new Error('Parameter "path" is required');
+        }
         const targetPath = resolveSafePath(searchPath);
         
         // Helper to run ripgrep via Bridge or locally
@@ -638,13 +644,22 @@ NOTE: For basic text search, use Cursor's built-in Grep tool`,
 server.tool(
     'find_references',
     `[AST-POWERED] Find all usages of a symbol across the project.
+
+REQUIRED PARAMETER:
+• element_name: string - Symbol name to find (e.g., "processData", "UserService")
+
+OPTIONAL PARAMETER:
+• path: string - Directory to search (default: entire workspace)
+
+Example: { "element_name": "processData", "path": "src" }
+
 • Semantic search: understands code structure
 • Distinguishes definitions from usages
 • Groups results by type (definition, import, call, reference)
 • Great for refactoring impact analysis`,
     {
-        element_name: z.string().describe('Symbol name (function, class, variable) to find'),
-        path: z.string().optional().describe('Limit search to specific directory')
+        element_name: z.string().describe('REQUIRED: Symbol name (function, class, variable) to find'),
+        path: z.string().optional().describe('Directory to search (default: workspace)')
     },
     async ({ element_name, path: searchPath = '.' }) => {
         const targetPath = resolveSafePath(searchPath);
@@ -706,13 +721,19 @@ server.tool(
 server.tool(
     'lint_code',
     `[MULTI-LAYER ANALYSIS] Check raw code string for issues without needing a file.
+
+REQUIRED PARAMETERS (both must be provided):
+• code: string - The code content to analyze
+• language: string - One of: "javascript", "typescript", "python", "go", "java"
+
+Example: { "code": "function test() { return }", "language": "javascript" }
+
 • Perfect for validating code before writing to file
-• Same multi-layer analysis as lint_file
 • Supports: javascript, typescript, python, go, java
 • Use to verify generated code is valid`,
     {
-        code: z.string().describe('Code content to analyze'),
-        language: z.string().describe('Language: javascript, typescript, python, go, java')
+        code: z.string().describe('REQUIRED: Code content to analyze'),
+        language: z.string().describe('REQUIRED: Language (javascript, typescript, python, go, java)')
     },
     async ({ code, language }) => {
         const linter = new CodeLinter();
@@ -850,15 +871,22 @@ Example: { "path": "src/utils.js", "line_number": 5, "content": "import { helper
 server.tool(
     'replace_line_range',
     `⚠️ PRIORITY 7 - Risky if file was modified (lines shift!)
+
+REQUIRED PARAMETERS (all 4 must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• start_line: number - First line to replace (1-based, inclusive)
+• end_line: number - Last line to replace (1-based, inclusive)
+• content: string - New content to insert
+
+Example: { "path": "src/utils.js", "start_line": 10, "end_line": 15, "content": "// replaced content" }
+
 • Better alternative: ast_replace_element (finds by name, not line)
-• Only use when you JUST read the file and lines are fresh
-• Get line numbers from get_file_outline
-• Sends only NEW code (good), but line numbers may be stale (bad)`,
+• Only use when lines are fresh from get_file_outline`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        start_line: z.number().describe('First line to replace (1-based, inclusive)'),
-        end_line: z.number().describe('Last line to replace (1-based, inclusive)'),
-        content: z.string().describe('New content to insert (can be multi-line)')
+        path: z.string().describe('REQUIRED: File path'),
+        start_line: z.number().describe('REQUIRED: First line (1-based)'),
+        end_line: z.number().describe('REQUIRED: Last line (1-based)'),
+        content: z.string().describe('REQUIRED: New content to insert')
     },
     async ({ path: inputPath, start_line, end_line, content: newContent }) => {
         const filePath = resolveSafePath(inputPath);
@@ -893,15 +921,23 @@ server.tool(
 server.tool(
     'insert_relative_to_marker',
     `⭐ PRIORITY 4 FOR WRITING - Insert near a unique text marker
-• Finds marker (e.g., function signature) and inserts before/after
+
+REQUIRED PARAMETERS (all 4 must be provided):
+• path: string - File path (e.g., "src/utils.js")
+• marker: string - Text to find as anchor point
+• position: string - "before" or "after"
+• content: string - Content to insert
+
+Example: { "path": "src/utils.js", "marker": "export default", "position": "before", "content": "\\nexport const helper = () => {};\\n" }
+
+• Finds marker and inserts before/after
 • Only sends: short marker + new code = efficient!
-• Great for: adding code after specific function, after imports
 • Marker should be unique - first occurrence is used`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        marker: z.string().describe('Text pattern to find as anchor point'),
-        position: z.enum(['before', 'after']).describe('Insert before or after the marker'),
-        content: z.string().describe('Content to insert (can be multi-line)')
+        path: z.string().describe('REQUIRED: File path'),
+        marker: z.string().describe('REQUIRED: Text pattern to find as anchor point'),
+        position: z.enum(['before', 'after']).describe('REQUIRED: Insert before or after the marker'),
+        content: z.string().describe('REQUIRED: Content to insert')
     },
     async ({ path: inputPath, marker, position, content: newContent }) => {
         const filePath = resolveSafePath(inputPath);
@@ -941,16 +977,26 @@ server.tool(
 server.tool(
     'replace_between_markers',
     `⭐ PRIORITY 5 - Replace content between two unique markers
-• Use when you have clear delimiters (e.g., /* START */ ... /* END */)
-• Sends: two short markers + new code = efficient!
-• Alternative to ast_replace_element when no function boundary
+
+REQUIRED PARAMETERS (all 4 must be provided):
+• path: string - File path (e.g., "src/config.js")
+• start_marker: string - Opening delimiter text
+• end_marker: string - Closing delimiter text
+• content: string - New content to insert between markers
+
+OPTIONAL:
+• include_markers: boolean - Also replace the marker texts (default: false)
+
+Example: { "path": "src/config.js", "start_marker": "/* CONFIG START */", "end_marker": "/* CONFIG END */", "content": "const debug = true;" }
+
+• Use when you have clear delimiters
 • Markers should be unique in the file`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        start_marker: z.string().describe('Opening delimiter text'),
-        end_marker: z.string().describe('Closing delimiter text'),
-        content: z.string().describe('New content to insert between markers'),
-        include_markers: z.boolean().optional().describe('Also replace the marker texts (default: false)')
+        path: z.string().describe('REQUIRED: File path'),
+        start_marker: z.string().describe('REQUIRED: Opening delimiter text'),
+        end_marker: z.string().describe('REQUIRED: Closing delimiter text'),
+        content: z.string().describe('REQUIRED: New content to insert between markers'),
+        include_markers: z.boolean().optional().describe('Also replace markers (default: false)')
     },
     async ({ path: inputPath, start_marker, end_marker, content: newContent, include_markers = false }) => {
         const filePath = resolveSafePath(inputPath);
@@ -1128,14 +1174,14 @@ REQUIRED PARAMETERS (all 4 must be provided):
 • path: string - File path (e.g., "src/utils.js")
 • element_name: string - Name of the function/class to replace
 • element_type: string - One of: "function", "class", "interface", "type", "method"
-• new_code: string - Complete new implementation
+• new_content: string - Complete new implementation
 
 Example:
 {
   "path": "src/utils.js",
   "element_name": "processData",
   "element_type": "function",
-  "new_code": "function processData(input) {\\n  return input.trim();\\n}"
+  "new_content": "function processData(input) {\\n  return input.trim();\\n}"
 }
 
 • BEST tool for modifying existing code!
@@ -1143,10 +1189,10 @@ Example:
 • AST finds the function automatically = safest method
 • Languages: JavaScript, TypeScript, Python, Go, Java`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        element_name: z.string().describe('Name of function or class to replace'),
-        element_type: z.enum(['function', 'class', 'interface', 'type', 'method']).describe('Type of element'),
-        new_content: z.string().describe('Complete new implementation')
+        path: z.string().describe('REQUIRED: File path'),
+        element_name: z.string().describe('REQUIRED: Name of function or class to replace'),
+        element_type: z.enum(['function', 'class', 'interface', 'type', 'method']).describe('REQUIRED: Type of element'),
+        new_content: z.string().describe('REQUIRED: Complete new implementation')
     },
     async ({ path: inputPath, element_name, element_type, new_content }) => {
         const filePath = resolveSafePath(inputPath);
@@ -1184,15 +1230,26 @@ Example:
 server.tool(
     'ast_rename_symbol',
     `🏆 PRIORITY 1 FOR RENAMING - Rename symbol throughout file
+
+REQUIRED PARAMETERS:
+• path: string - File path (e.g., "src/utils.js")
+• old_name: string - Current name of the symbol
+• new_name: string - New name for the symbol
+
+OPTIONAL:
+• symbol_type: string - "variable", "function", "class", or "any" (default)
+
+Example: { "path": "src/utils.js", "old_name": "processData", "new_name": "handleData" }
+
 • MINIMAL tokens: just old name + new name!
 • Finds ALL occurrences automatically
 • Much safer than Cursor StrReplace (won't break strings/comments)
 • Languages: JavaScript, TypeScript, Python, Go, Java`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        old_name: z.string().describe('Current name of the symbol'),
-        new_name: z.string().describe('New name for the symbol'),
-        symbol_type: z.enum(['variable', 'function', 'class', 'any']).optional().describe('Type of symbol to rename (default: any)')
+        path: z.string().describe('REQUIRED: File path'),
+        old_name: z.string().describe('REQUIRED: Current name of the symbol'),
+        new_name: z.string().describe('REQUIRED: New name for the symbol'),
+        symbol_type: z.enum(['variable', 'function', 'class', 'any']).optional().describe('Type of symbol (default: any)')
     },
     async ({ path: inputPath, old_name, new_name, symbol_type = 'any' }) => {
         const filePath = resolveSafePath(inputPath);
@@ -1243,16 +1300,28 @@ server.tool(
 server.tool(
     'ast_add_import',
     `🏆 PRIORITY 2 FOR IMPORTS - Add import statement smartly
-• MINIMAL tokens: just module name + what to import!
+
+REQUIRED PARAMETERS:
+• path: string - File path (e.g., "src/App.tsx")
+• module_source: string - Module to import from (e.g., "react", "./utils")
+
+OPTIONAL (at least one needed):
+• named_imports: string[] - Named imports (e.g., ["useState", "useEffect"])
+• default_import: string - Default import name (e.g., "React")
+• import_all_as: string - Import all as name (e.g., "utils")
+
+Example: { "path": "src/App.tsx", "module_source": "react", "named_imports": ["useState", "useEffect"] }
+Example: { "path": "src/App.tsx", "module_source": "react", "default_import": "React" }
+
 • Automatically places at correct location
 • Won't add duplicates
 • Languages: JavaScript, TypeScript, Python`,
     {
-        path: z.string().describe('File path (Windows or Linux style)'),
-        module_source: z.string().describe('Module to import from (e.g., "react", "./utils")'),
-        named_imports: z.array(z.string()).optional().describe('Named imports (e.g., ["useState", "useEffect"])'),
-        default_import: z.string().optional().describe('Default import name (e.g., "React")'),
-        import_all_as: z.string().optional().describe('Import all as name (e.g., "* as utils")')
+        path: z.string().describe('REQUIRED: File path'),
+        module_source: z.string().describe('REQUIRED: Module to import from'),
+        named_imports: z.array(z.string()).optional().describe('Named imports array'),
+        default_import: z.string().optional().describe('Default import name'),
+        import_all_as: z.string().optional().describe('Import all as name')
     },
     async ({ path: inputPath, module_source, named_imports, default_import, import_all_as }) => {
         const filePath = resolveSafePath(inputPath);
