@@ -720,7 +720,7 @@ class CodeAnalyzer {
         }
 
         if (results.length === 0) {
-            return [{ message: `Element '${targetName}' of type '${type}' not found.` }];
+            return [];
         }
 
         return results;
@@ -835,7 +835,7 @@ class CodeAnalyzer {
         });
 
         if (results.length === 0) {
-            return [{ message: `Element '${targetName}' of type '${type}' not found.` }];
+            return [];
         }
 
         return results;

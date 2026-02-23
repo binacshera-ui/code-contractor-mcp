@@ -339,6 +339,114 @@ const server = new McpServer({
 });
 
 // =============================================================================
+// CATEGORY 0: Basic File Operations (read/write/delete)
+// =============================================================================
+
+server.tool(
+    'write_file',
+    `Write content to a file (creates or overwrites).
+
+REQUIRED PARAMETERS:
+• path: string - File path (e.g., "/host/home/user/project/file.js")
+• content: string - Content to write
+
+Example: { "path": "/host/home/user/project/file.js", "content": "const x = 1;" }
+
+• Creates parent directories automatically
+• Overwrites existing files
+• Creates new files if they don't exist`,
+    {
+        path: z.string().describe('REQUIRED: File path'),
+        content: z.string().describe('REQUIRED: Content to write')
+    },
+    async ({ path: inputPath, content }) => {
+        const filePath = resolveSafePath(inputPath);
+        const backupPath = backupFile(filePath);
+        
+        // Ensure parent directory exists
+        const dir = path.dirname(filePath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        
+        await bridge.writeFile(filePath, content);
+        
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({ status: 'success', action: 'written', file: inputPath, size: content.length, backup: backupPath })
+            }]
+        };
+    }
+);
+
+server.tool(
+    'read_file',
+    `Read content of a file.
+
+REQUIRED PARAMETER:
+• path: string - File path (e.g., "/host/home/user/project/file.js")
+
+Example: { "path": "/host/home/user/project/file.js" }
+
+Returns the full file content as text.`,
+    {
+        path: z.string().describe('REQUIRED: File path to read')
+    },
+    async ({ path: inputPath }) => {
+        const filePath = resolveSafePath(inputPath);
+        
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
+            throw new Error(`File not found: ${inputPath}`);
+        }
+        
+        const content = await bridge.readFile(filePath);
+        const lines = content.split('\n').length;
+        
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({ file: inputPath, lines, size: content.length, content })
+            }]
+        };
+    }
+);
+
+server.tool(
+    'delete_file',
+    `Delete a file permanently.
+
+REQUIRED PARAMETER:
+• path: string - File path to delete
+
+Example: { "path": "/host/home/user/project/temp.js" }
+
+• Creates a backup before deleting (recoverable via list_backups)`,
+    {
+        path: z.string().describe('REQUIRED: File path to delete')
+    },
+    async ({ path: inputPath }) => {
+        const filePath = resolveSafePath(inputPath);
+        
+        const exists = await bridge.exists(filePath);
+        if (!exists) {
+            throw new Error(`File not found: ${inputPath}`);
+        }
+        
+        const backupPath = backupFile(filePath);
+        await bridge.deleteFile(filePath);
+        
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({ status: 'success', action: 'deleted', file: inputPath, backup: backupPath })
+            }]
+        };
+    }
+);
+
+// =============================================================================
 // CATEGORY 1: Code Intelligence (AST-powered)
 // =============================================================================
 
@@ -362,7 +470,6 @@ Example: { "path": "src/components/Button.tsx" }
     async ({ path: inputPath }) => {
         const filePath = resolveSafePath(inputPath);
         
-        // Use Bridge for file access (supports remote files)
         const exists = await bridge.exists(filePath);
         if (!exists) {
             throw new Error(`File not found: ${inputPath}`);
@@ -487,39 +594,40 @@ MODES:
         const targetPath = resolveSafePath(searchPath);
         
         // Check if target is a file or directory
-        let searchTarget = '.';  // Default: search current directory
+        let searchTarget = targetPath;  // default: search entire target path
         let workingDir = targetPath;
         
         try {
             const stats = fs.statSync(targetPath);
             if (stats.isFile()) {
-                // Target is a file - search that specific file
-                searchTarget = targetPath;
                 workingDir = path.dirname(targetPath);
             }
         } catch (e) {
-            // Path doesn't exist or can't stat - assume directory
+            // Path doesn't exist or can't stat - proceed anyway
         }
         
-        // Helper to run ripgrep via Bridge or locally
-        const runRipgrep = async (args, searchIn = searchTarget) => {
-            const command = `rg ${args} "${searchIn}"`;
+        // Helper to run ripgrep - uses spawnSync with args array to avoid shell quoting issues
+        const { spawnSync } = require('child_process');
+        const runRipgrep = async (baseArgs) => {
+            // Build args array: base flags + search path
+            const allArgs = [...baseArgs, searchTarget];
+            
             if (USE_BRIDGE) {
+                const command = 'rg ' + allArgs.map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ');
                 const result = await callBridge('run_command', { command, cwd: workingDir });
                 return result.stdout || '';
             } else {
-                // Local Docker execution
-                try {
-                    return execSync(command, { 
-                        cwd: workingDir, 
-                        encoding: 'utf-8',
-                        maxBuffer: 10 * 1024 * 1024,
-                        stdio: ['pipe', 'pipe', 'pipe']
-                    });
-                } catch (e) {
-                    // ripgrep returns exit code 1 when no matches - that's OK
-                    return e.stdout || '';
+                // Use spawnSync with args array - no shell quoting issues!
+                const result = spawnSync('rg', allArgs, {
+                    cwd: workingDir,
+                    encoding: 'utf-8',
+                    maxBuffer: 10 * 1024 * 1024
+                });
+                // Exit 0 = matches found, 1 = no matches, 2 = error
+                if (result.status === 2 || result.error) {
+                    return '';
                 }
+                return result.stdout || '';
             }
         };
         
@@ -547,77 +655,70 @@ MODES:
         const regexFlag = regex ? '' : '-F';
         const excludes = '--glob "!node_modules" --glob "!.git" --glob "!dist" --glob "!build"';
         
-        // Escape special regex characters in term for pattern matching
-        const escapedTerm = term ? term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+        // Build base flags as arrays (no quoting issues!)
+        // --with-filename ensures output always has file:line:content format (even for single file)
+        const baseFlags = ['-n', '--with-filename'];
+        if (!case_sensitive) baseFlags.push('-i');
+        if (!regex) baseFlags.push('-F');
+        
+        // Exclusion globs as array
+        const excludeArgs = [
+            '--glob', '!node_modules', '--glob', '!.git',
+            '--glob', '!dist', '--glob', '!build', '--glob', '!__pycache__'
+        ];
+        
+        const isDefinitionLine = (line) => (
+            /^\s*(export\s+)?(const|let|var)\s+\w+\s*=/.test(line) ||
+            /^\s*(export\s+)?(async\s+)?function\s+/.test(line) ||
+            /^\s*(export\s+)?class\s+/.test(line) ||
+            /^\s*def\s+\w+\s*\(/.test(line) ||
+            /^\s*func\s+/.test(line) ||
+            /^\s*(public|private|protected|internal)/.test(line)
+        );
         
         switch (mode) {
-            case 'definitions':
-                // For definitions, we need to search for the term as a symbol name
-                // First do a basic search, then filter for definitions
-                const defOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -F "${term}"`);
-                const defMatches = parseRgOutput(defOutput);
-                
-                // Filter to only definition patterns
-                results = defMatches.filter(r => {
-                    const line = r.content;
-                    // Check for common definition patterns
-                    return (
-                        /^\s*(export\s+)?(const|let|var)\s+\w+\s*=/.test(line) ||
-                        /^\s*(export\s+)?(async\s+)?function\s+/.test(line) ||
-                        /^\s*(export\s+)?class\s+/.test(line) ||
-                        /^\s*def\s+\w+\s*\(/.test(line) ||  // Python
-                        /^\s*func\s+/.test(line) ||  // Go
-                        /^\s*(public|private|protected)?\s*(static\s+)?[\w<>]+\s+\w+\s*\(/.test(line)  // Java
-                    );
-                }).map(r => ({ ...r, type: 'definition' }));
+            case 'definitions': {
+                const output = await runRipgrep([...baseFlags, ...excludeArgs, term]);
+                results = parseRgOutput(output)
+                    .filter(r => isDefinitionLine(r.content))
+                    .map(r => ({ ...r, type: 'definition' }));
                 break;
+            }
                 
-            case 'usages':
-                // Find usages (excluding definitions)
-                const usageOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -F "${term}"`);
-                const allUsages = parseRgOutput(usageOutput);
-                // Filter out likely definitions
-                results = allUsages.filter(r => {
-                    const line = r.content;
-                    return !(
-                        /^\s*(export\s+)?(const|let|var)\s+\w+\s*=/.test(line) ||
-                        /^\s*(export\s+)?(async\s+)?function\s+/.test(line) ||
-                        /^\s*(export\s+)?class\s+/.test(line) ||
-                        /^\s*def\s+\w+\s*\(/.test(line) ||
-                        /^\s*func\s+/.test(line)
-                    );
-                }).map(r => ({ ...r, type: 'usage' }));
+            case 'usages': {
+                const output = await runRipgrep([...baseFlags, ...excludeArgs, term]);
+                results = parseRgOutput(output)
+                    .filter(r => !isDefinitionLine(r.content))
+                    .map(r => ({ ...r, type: 'usage' }));
                 break;
+            }
                 
-            case 'imports':
-                // Find import statements containing the term
-                const importOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -F "${term}"`);
-                const importMatches = parseRgOutput(importOutput);
-                results = importMatches.filter(r => {
-                    const line = r.content;
-                    return /^\s*(import\s|from\s|require\s*\()/.test(line);
-                }).map(r => ({ ...r, type: 'import' }));
+            case 'imports': {
+                const output = await runRipgrep([...baseFlags, ...excludeArgs, term]);
+                results = parseRgOutput(output)
+                    .filter(r => /^\s*(import\s|from\s|require\s*\()/.test(r.content))
+                    .map(r => ({ ...r, type: 'import' }));
                 break;
+            }
                 
-            case 'todos':
-                // Find TODO/FIXME comments
-                const todoOutput = await runRipgrep(`-n ${excludes} -e "TODO" -e "FIXME" -e "HACK" -e "XXX"`);
-                results = parseRgOutput(todoOutput).map(r => ({ ...r, type: 'todo' }));
+            case 'todos': {
+                const output = await runRipgrep(['-n', '-i', ...excludeArgs, '-e', 'TODO', '-e', 'FIXME', '-e', 'HACK', '-e', 'XXX']);
+                results = parseRgOutput(output).map(r => ({ ...r, type: 'todo' }));
                 break;
+            }
                 
-            case 'secrets':
-                // Find potential secrets
-                const secretOutput = await runRipgrep(`-n -i ${excludes} -e "password" -e "api_key" -e "secret" -e "token" -e "apikey"`);
-                results = parseRgOutput(secretOutput).filter(r => {
-                    // Must have assignment
-                    return r.content.includes('=') || r.content.includes(':');
-                }).map(r => ({ ...r, type: 'potential_secret' }));
+            case 'secrets': {
+                const output = await runRipgrep(['-n', '-i', ...excludeArgs, '-e', 'password', '-e', 'api_key', '-e', 'secret_key', '-e', 'apikey', '-e', 'access_token']);
+                results = parseRgOutput(output)
+                    .filter(r => r.content.includes('=') || r.content.includes(':'))
+                    .map(r => ({ ...r, type: 'potential_secret' }));
                 break;
+            }
                 
-            case 'count':
-                const countOutput = await runRipgrep(`-c ${caseFlag} ${regexFlag} ${excludes} "${term}"`);
+            case 'count': {
+                const output = await runRipgrep(['-c', ...baseFlags, ...excludeArgs, term]);
                 let totalCount = 0;
-                countOutput.split('\n').forEach(line => {
+                output.split('\n').forEach(line => {
                     const match = line.match(/:(\d+)$/);
                     if (match) totalCount += parseInt(match[1]);
                 });
@@ -627,38 +728,31 @@ MODES:
                         text: JSON.stringify({ term, mode, count: totalCount }, null, 2)
                     }]
                 };
+            }
                 
-            case 'files':
-                const filesOutput = await runRipgrep(`-l ${caseFlag} ${regexFlag} ${excludes} "${term}"`);
-                results = filesOutput.split('\n').filter(l => l.trim()).slice(0, max_results).map(f => ({ file: f }));
+            case 'files': {
+                const output = await runRipgrep(['-l', ...baseFlags, ...excludeArgs, term]);
+                results = output.split('\n').filter(l => l.trim()).slice(0, max_results).map(f => ({ file: f }));
                 break;
+            }
                 
             case 'smart':
-            default:
-                // Smart search - find all matches with the term
-                const smartOutput = await runRipgrep(`-n ${caseFlag} ${regexFlag} ${excludes} "${term}"`);
-                const matches = parseRgOutput(smartOutput);
-                
-                // Classify each match
-                results = matches.map(r => {
-                    let resultType = 'reference';
+            default: {
+                const output = await runRipgrep([...baseFlags, ...excludeArgs, term]);
+                results = parseRgOutput(output).map(r => {
                     const line = r.content;
-                    
-                    // Check for definition patterns
-                    if (/^\s*(export\s+)?(const|let|var)\s+\w+\s*=/.test(line) ||
-                        /^\s*(export\s+)?(async\s+)?function\s+/.test(line) ||
-                        /^\s*(export\s+)?class\s+/.test(line) ||
-                        /^\s*def\s+\w+\s*\(/.test(line) ||
-                        /^\s*func\s+/.test(line)) {
+                    let resultType = 'reference';
+                    if (isDefinitionLine(line)) {
                         resultType = 'definition';
                     } else if (/^\s*(import\s|from\s|require\s*\()/.test(line)) {
                         resultType = 'import';
-                    } else if (new RegExp(`${escapedTerm}\\s*\\(`).test(line)) {
+                    } else if (line.includes(term + '(') || line.includes(term + ' (')) {
                         resultType = 'call';
                     }
-                    
                     return { ...r, type: resultType };
                 });
+                break;
+            }
         }
         
         // Clean paths
@@ -716,23 +810,26 @@ Example: { "element_name": "processData", "path": "src" }
             }
         } catch (e) {}
         
-        // Run ripgrep via Bridge or locally
-        const runRipgrep = async (args, searchIn = searchTarget) => {
-            const command = `rg ${args} "${searchIn}"`;
+        // Run ripgrep via Bridge or locally (spawnSync = no shell quoting issues)
+        const { spawnSync: spawnSyncRef } = require('child_process');
+        const runRipgrep = async (args) => {
+            const allArgs = [...args, searchTarget];
             if (USE_BRIDGE) {
+                const command = 'rg ' + allArgs.map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ');
                 const result = await callBridge('run_command', { command, cwd: workingDir });
                 return result.stdout || '';
             } else {
-                try {
-                    return execSync(command, { cwd: workingDir, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
-                } catch (e) {
-                    return e.stdout || '';
-                }
+                const result = spawnSyncRef('rg', allArgs, {
+                    cwd: workingDir,
+                    encoding: 'utf-8',
+                    maxBuffer: 10 * 1024 * 1024
+                });
+                return result.stdout || '';
             }
         };
         
-        // Search for all occurrences
-        const output = await runRipgrep(`-n -w ${excludes} "${element_name}"`);
+        // Search for all occurrences (whole word match, --with-filename for consistent output)
+        const output = await runRipgrep(['-n', '--with-filename', '-w', '--glob', '!node_modules', '--glob', '!.git', '--glob', '!dist', '--glob', '!build', element_name]);
         
         // Group by type
         const grouped = { definitions: [], imports: [], calls: [], references: [] };
@@ -756,10 +853,12 @@ Example: { "element_name": "processData", "path": "src" }
             }
         });
         
+        const total = grouped.definitions.length + grouped.imports.length + grouped.calls.length + grouped.references.length;
+        
         return {
             content: [{
                 type: 'text',
-                text: JSON.stringify({ element: element_name, ...grouped }, null, 2)
+                text: JSON.stringify({ element: element_name, total, ...grouped }, null, 2)
             }]
         };
     }
