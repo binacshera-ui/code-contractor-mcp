@@ -486,21 +486,38 @@ MODES:
         }
         const targetPath = resolveSafePath(searchPath);
         
+        // Check if target is a file or directory
+        let searchTarget = '.';  // Default: search current directory
+        let workingDir = targetPath;
+        
+        try {
+            const stats = fs.statSync(targetPath);
+            if (stats.isFile()) {
+                // Target is a file - search that specific file
+                searchTarget = targetPath;
+                workingDir = path.dirname(targetPath);
+            }
+        } catch (e) {
+            // Path doesn't exist or can't stat - assume directory
+        }
+        
         // Helper to run ripgrep via Bridge or locally
-        const runRipgrep = async (args) => {
-            const command = `rg ${args}`;
+        const runRipgrep = async (args, searchIn = searchTarget) => {
+            const command = `rg ${args} "${searchIn}"`;
             if (USE_BRIDGE) {
-                const result = await callBridge('run_command', { command, cwd: targetPath });
+                const result = await callBridge('run_command', { command, cwd: workingDir });
                 return result.stdout || '';
             } else {
                 // Local Docker execution
                 try {
                     return execSync(command, { 
-                        cwd: targetPath, 
+                        cwd: workingDir, 
                         encoding: 'utf-8',
-                        maxBuffer: 10 * 1024 * 1024 
+                        maxBuffer: 10 * 1024 * 1024,
+                        stdio: ['pipe', 'pipe', 'pipe']
                     });
                 } catch (e) {
+                    // ripgrep returns exit code 1 when no matches - that's OK
                     return e.stdout || '';
                 }
             }
@@ -530,57 +547,75 @@ MODES:
         const regexFlag = regex ? '' : '-F';
         const excludes = '--glob "!node_modules" --glob "!.git" --glob "!dist" --glob "!build"';
         
+        // Escape special regex characters in term for pattern matching
+        const escapedTerm = term ? term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+        
         switch (mode) {
             case 'definitions':
-                // Search for definition patterns
-                const defPatterns = [
-                    `function\\s+${term}`, `class\\s+${term}`, `const\\s+${term}\\s*=`,
-                    `let\\s+${term}\\s*=`, `var\\s+${term}\\s*=`, `def\\s+${term}`,
-                    `async\\s+function\\s+${term}`, `${term}\\s*=\\s*function`
-                ];
-                const defOutput = await runRipgrep(`-n ${excludes} -e "${defPatterns.join('" -e "')}" .`);
-                results = parseRgOutput(defOutput).map(r => ({ ...r, type: 'definition' }));
+                // For definitions, we need to search for the term as a symbol name
+                // First do a basic search, then filter for definitions
+                const defOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -F "${term}"`);
+                const defMatches = parseRgOutput(defOutput);
+                
+                // Filter to only definition patterns
+                results = defMatches.filter(r => {
+                    const line = r.content;
+                    // Check for common definition patterns
+                    return (
+                        /^\s*(export\s+)?(const|let|var)\s+\w+\s*=/.test(line) ||
+                        /^\s*(export\s+)?(async\s+)?function\s+/.test(line) ||
+                        /^\s*(export\s+)?class\s+/.test(line) ||
+                        /^\s*def\s+\w+\s*\(/.test(line) ||  // Python
+                        /^\s*func\s+/.test(line) ||  // Go
+                        /^\s*(public|private|protected)?\s*(static\s+)?[\w<>]+\s+\w+\s*\(/.test(line)  // Java
+                    );
+                }).map(r => ({ ...r, type: 'definition' }));
                 break;
                 
             case 'usages':
                 // Find usages (excluding definitions)
-                const usageOutput = await runRipgrep(`-n ${caseFlag} ${excludes} "${term}" .`);
+                const usageOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -F "${term}"`);
                 const allUsages = parseRgOutput(usageOutput);
                 // Filter out likely definitions
                 results = allUsages.filter(r => {
                     const line = r.content;
-                    return !line.match(new RegExp(`(function|class|const|let|var|def|async)\\s+${term}`));
+                    return !(
+                        /^\s*(export\s+)?(const|let|var)\s+\w+\s*=/.test(line) ||
+                        /^\s*(export\s+)?(async\s+)?function\s+/.test(line) ||
+                        /^\s*(export\s+)?class\s+/.test(line) ||
+                        /^\s*def\s+\w+\s*\(/.test(line) ||
+                        /^\s*func\s+/.test(line)
+                    );
                 }).map(r => ({ ...r, type: 'usage' }));
                 break;
                 
             case 'imports':
-                // Find import statements
-                const importPatterns = [
-                    `import.*${term}`, `from\\s+['"].*${term}`, 
-                    `require\\(['"].*${term}`, `from\\s+${term}\\s+import`
-                ];
-                const importOutput = await runRipgrep(`-n ${excludes} -e "${importPatterns.join('" -e "')}" .`);
-                results = parseRgOutput(importOutput).map(r => ({ ...r, type: 'import' }));
+                // Find import statements containing the term
+                const importOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -F "${term}"`);
+                const importMatches = parseRgOutput(importOutput);
+                results = importMatches.filter(r => {
+                    const line = r.content;
+                    return /^\s*(import\s|from\s|require\s*\()/.test(line);
+                }).map(r => ({ ...r, type: 'import' }));
                 break;
                 
             case 'todos':
                 // Find TODO/FIXME comments
-                const todoOutput = await runRipgrep(`-n ${excludes} -e "TODO" -e "FIXME" -e "HACK" -e "XXX" .`);
+                const todoOutput = await runRipgrep(`-n ${excludes} -e "TODO" -e "FIXME" -e "HACK" -e "XXX"`);
                 results = parseRgOutput(todoOutput).map(r => ({ ...r, type: 'todo' }));
                 break;
                 
             case 'secrets':
                 // Find potential secrets
-                const secretPatterns = [
-                    'password\\s*=', 'api_key\\s*=', 'secret\\s*=', 
-                    'token\\s*=', 'apikey', 'API_KEY', 'SECRET_KEY'
-                ];
-                const secretOutput = await runRipgrep(`-n ${caseFlag} ${excludes} -e "${secretPatterns.join('" -e "')}" .`);
-                results = parseRgOutput(secretOutput).map(r => ({ ...r, type: 'potential_secret' }));
+                const secretOutput = await runRipgrep(`-n -i ${excludes} -e "password" -e "api_key" -e "secret" -e "token" -e "apikey"`);
+                results = parseRgOutput(secretOutput).filter(r => {
+                    // Must have assignment
+                    return r.content.includes('=') || r.content.includes(':');
+                }).map(r => ({ ...r, type: 'potential_secret' }));
                 break;
                 
             case 'count':
-                const countOutput = await runRipgrep(`-c ${caseFlag} ${regexFlag} ${excludes} "${term}" .`);
+                const countOutput = await runRipgrep(`-c ${caseFlag} ${regexFlag} ${excludes} "${term}"`);
                 let totalCount = 0;
                 countOutput.split('\n').forEach(line => {
                     const match = line.match(/:(\d+)$/);
@@ -594,14 +629,14 @@ MODES:
                 };
                 
             case 'files':
-                const filesOutput = await runRipgrep(`-l ${caseFlag} ${regexFlag} ${excludes} "${term}" .`);
+                const filesOutput = await runRipgrep(`-l ${caseFlag} ${regexFlag} ${excludes} "${term}"`);
                 results = filesOutput.split('\n').filter(l => l.trim()).slice(0, max_results).map(f => ({ file: f }));
                 break;
                 
             case 'smart':
             default:
-                // Smart search with AST classification
-                const smartOutput = await runRipgrep(`-n ${caseFlag} ${regexFlag} ${excludes} "${term}" .`);
+                // Smart search - find all matches with the term
+                const smartOutput = await runRipgrep(`-n ${caseFlag} ${regexFlag} ${excludes} "${term}"`);
                 const matches = parseRgOutput(smartOutput);
                 
                 // Classify each match
@@ -609,12 +644,16 @@ MODES:
                     let resultType = 'reference';
                     const line = r.content;
                     
-                    // Check if it's a definition
-                    if (line.match(new RegExp(`(function|class|const|let|var|def|async\\s+function)\\s+${term}`))) {
+                    // Check for definition patterns
+                    if (/^\s*(export\s+)?(const|let|var)\s+\w+\s*=/.test(line) ||
+                        /^\s*(export\s+)?(async\s+)?function\s+/.test(line) ||
+                        /^\s*(export\s+)?class\s+/.test(line) ||
+                        /^\s*def\s+\w+\s*\(/.test(line) ||
+                        /^\s*func\s+/.test(line)) {
                         resultType = 'definition';
-                    } else if (line.match(new RegExp(`(import|require|from).*${term}`))) {
+                    } else if (/^\s*(import\s|from\s|require\s*\()/.test(line)) {
                         resultType = 'import';
-                    } else if (line.match(new RegExp(`${term}\\s*\\(`))) {
+                    } else if (new RegExp(`${escapedTerm}\\s*\\(`).test(line)) {
                         resultType = 'call';
                     }
                     
@@ -665,15 +704,27 @@ Example: { "element_name": "processData", "path": "src" }
         const targetPath = resolveSafePath(searchPath);
         const excludes = '--glob "!node_modules" --glob "!.git" --glob "!dist" --glob "!build"';
         
+        // Check if target is a file or directory
+        let searchTarget = '.';
+        let workingDir = targetPath;
+        
+        try {
+            const stats = fs.statSync(targetPath);
+            if (stats.isFile()) {
+                searchTarget = targetPath;
+                workingDir = path.dirname(targetPath);
+            }
+        } catch (e) {}
+        
         // Run ripgrep via Bridge or locally
-        const runRipgrep = async (args) => {
-            const command = `rg ${args}`;
+        const runRipgrep = async (args, searchIn = searchTarget) => {
+            const command = `rg ${args} "${searchIn}"`;
             if (USE_BRIDGE) {
-                const result = await callBridge('run_command', { command, cwd: targetPath });
+                const result = await callBridge('run_command', { command, cwd: workingDir });
                 return result.stdout || '';
             } else {
                 try {
-                    return execSync(command, { cwd: targetPath, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+                    return execSync(command, { cwd: workingDir, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
                 } catch (e) {
                     return e.stdout || '';
                 }
@@ -681,7 +732,7 @@ Example: { "element_name": "processData", "path": "src" }
         };
         
         // Search for all occurrences
-        const output = await runRipgrep(`-n -w ${excludes} "${element_name}" .`);
+        const output = await runRipgrep(`-n -w ${excludes} "${element_name}"`);
         
         // Group by type
         const grouped = { definitions: [], imports: [], calls: [], references: [] };
