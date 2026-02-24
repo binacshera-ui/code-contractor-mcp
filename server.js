@@ -49,14 +49,25 @@ const BRIDGE_HOST = process.env.BRIDGE_HOST || 'host.docker.internal';
 const BRIDGE_PORT = process.env.BRIDGE_PORT || 9111;
 const BRIDGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}`;
 
-// Check if /host mount exists (Linux full filesystem mount)
-// This MUST be checked early, before USE_BRIDGE decision
-const HOST_MOUNT_EXISTS = fs.existsSync('/host');
+// Check which mount mode we're in:
+// Mode 1: /host mount (full filesystem, e.g., -v /:/host or -v c:/:/host)
+// Mode 2: /workspace mount (e.g., -v c:/:/workspace)
+// Mode 3: No mount (Bridge mode for remote access)
+const HOST_MOUNT_EXISTS = fs.existsSync('/host') && fs.readdirSync('/host').length > 0;
+const WORKSPACE_MOUNT_EXISTS = !HOST_MOUNT_EXISTS && fs.existsSync('/workspace') && fs.readdirSync('/workspace').length > 0;
 
-// USE_BRIDGE is disabled when we have HOST_MOUNT (direct filesystem access)
-const USE_BRIDGE = !HOST_MOUNT_EXISTS && process.env.USE_BRIDGE !== 'false';
+// USE_BRIDGE only when NO direct filesystem access
+const USE_BRIDGE = !HOST_MOUNT_EXISTS && !WORKSPACE_MOUNT_EXISTS && process.env.USE_BRIDGE !== 'false';
 
 const WORKSPACE_ROOT = process.env.MCP_WORKSPACE || '/workspace';
+
+if (HOST_MOUNT_EXISTS) {
+    console.error('[MCP] Mode: /host mount (full filesystem access)');
+} else if (WORKSPACE_MOUNT_EXISTS) {
+    console.error('[MCP] Mode: /workspace mount (direct filesystem access)');
+} else if (USE_BRIDGE) {
+    console.error('[MCP] Mode: Bridge (remote file access via port 9111)');
+}
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || '3000000'); // 3MB
 const MAX_LINES = parseInt(process.env.MAX_LINES || '3000');
 const BACKUP_ENABLED = process.env.BACKUP !== 'false';
@@ -238,19 +249,32 @@ function resolveSafePath(inputPath) {
         normalizedPath = normalizedPath.substring('/host'.length);
     }
     
-    // MODE 1: Host mount exists (Linux with -v /:/host)
-    // Docker has direct access to entire filesystem via /host
+    // MODE 1: Host mount exists (-v /:/host or -v c:/:/host)
     if (HOST_MOUNT_EXISTS) {
-        // Ensure path starts with /
         if (!normalizedPath.startsWith('/')) {
             normalizedPath = '/' + normalizedPath;
         }
-        // Return path under /host
         return '/host' + normalizedPath;
     }
     
-    // MODE 2: Bridge mode (Windows or without host mount)
-    // Pass absolute paths to Bridge
+    // MODE 2: Workspace mount exists (-v c:/:/workspace or -v /home/user:/workspace)
+    if (WORKSPACE_MOUNT_EXISTS) {
+        // Already inside /workspace - handle absolute and relative paths
+        if (normalizedPath.startsWith('/workspace/')) {
+            return normalizedPath;
+        }
+        if (normalizedPath.startsWith('/workspace')) {
+            return normalizedPath;
+        }
+        // For absolute paths, map to /workspace
+        if (normalizedPath.startsWith('/')) {
+            return '/workspace' + normalizedPath;
+        }
+        // For relative paths, join with workspace root
+        return path.join('/workspace', normalizedPath);
+    }
+    
+    // MODE 3: Bridge mode (remote file access)
     if (USE_BRIDGE) {
         if (!normalizedPath.startsWith('/')) {
             normalizedPath = '/' + normalizedPath;
@@ -258,28 +282,14 @@ function resolveSafePath(inputPath) {
         return normalizedPath;
     }
     
-    // MODE 3: Docker-only with workspace mount (legacy)
-    // For relative paths, join with workspace root
-    // For absolute paths, check if they're within workspace
+    // Fallback: try workspace
     if (normalizedPath.startsWith('/')) {
-        // Absolute path - check if it's meant to be relative to workspace
         if (!normalizedPath.startsWith(WORKSPACE_ROOT)) {
-            // Treat as relative path by stripping leading /
             normalizedPath = normalizedPath.substring(1);
         }
     }
     
-    const resolved = path.join(WORKSPACE_ROOT, normalizedPath);
-    
-    // Security check: ensure we're still within workspace
-    const realResolved = path.resolve(resolved);
-    const realWorkspace = path.resolve(WORKSPACE_ROOT);
-    
-    if (!realResolved.startsWith(realWorkspace)) {
-        throw new Error(`Security: Path '${inputPath}' is outside workspace.`);
-    }
-    
-    return realResolved;
+    return path.join(WORKSPACE_ROOT, normalizedPath);
 }
 
 function backupFile(filePath) {
