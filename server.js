@@ -712,13 +712,13 @@ MODES:
             }
                 
             case 'todos': {
-                const output = await runRipgrep(['-n', '-i', ...excludeArgs, '-e', 'TODO', '-e', 'FIXME', '-e', 'HACK', '-e', 'XXX']);
+                const output = await runRipgrep(['-n', '--with-filename', '-i', ...excludeArgs, '-e', 'TODO', '-e', 'FIXME', '-e', 'HACK', '-e', 'XXX']);
                 results = parseRgOutput(output).map(r => ({ ...r, type: 'todo' }));
                 break;
             }
                 
             case 'secrets': {
-                const output = await runRipgrep(['-n', '-i', ...excludeArgs, '-e', 'password', '-e', 'api_key', '-e', 'secret_key', '-e', 'apikey', '-e', 'access_token']);
+                const output = await runRipgrep(['-n', '--with-filename', '-i', ...excludeArgs, '-e', 'password', '-e', 'api_key', '-e', 'secret_key', '-e', 'apikey', '-e', 'access_token', '-e', 'api.key', '-e', 'API_KEY', '-e', 'SECRET']);
                 results = parseRgOutput(output)
                     .filter(r => r.content.includes('=') || r.content.includes(':'))
                     .map(r => ({ ...r, type: 'potential_secret' }));
