@@ -310,7 +310,13 @@ function detectLanguage(filePath) {
         '.ts': 'typescript', '.tsx': 'typescript',
         '.py': 'python',
         '.go': 'go',
-        '.java': 'java'
+        '.java': 'java',
+        '.cs': 'csharp',
+        '.rb': 'ruby',
+        '.c': 'c', '.h': 'c',
+        '.cpp': 'cpp', '.cc': 'cpp', '.cxx': 'cpp', '.hpp': 'cpp', '.hh': 'cpp',
+        '.rs': 'rust',
+        '.php': 'php',
     };
     return map[ext] || null;
 }

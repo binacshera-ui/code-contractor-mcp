@@ -19,7 +19,7 @@
 const Parser = require('tree-sitter');
 
 // Lazy-load language modules to handle missing ones gracefully
-let JavaScript, TypeScript, TSX, Python, Go, Java;
+let JavaScript, TypeScript, TSX, Python, Go, Java, CSharp, Ruby, C, Cpp, Rust, PHP;
 
 try { JavaScript = require('tree-sitter-javascript'); } catch (e) { JavaScript = null; }
 try { 
@@ -33,6 +33,15 @@ try {
 try { Python = require('tree-sitter-python'); } catch (e) { Python = null; }
 try { Go = require('tree-sitter-go'); } catch (e) { Go = null; }
 try { Java = require('tree-sitter-java'); } catch (e) { Java = null; }
+try { CSharp = require('tree-sitter-c-sharp'); } catch (e) { CSharp = null; }
+try { Ruby = require('tree-sitter-ruby'); } catch (e) { Ruby = null; }
+try { C = require('tree-sitter-c'); } catch (e) { C = null; }
+try { Cpp = require('tree-sitter-cpp'); } catch (e) { Cpp = null; }
+try { Rust = require('tree-sitter-rust'); } catch (e) { Rust = null; }
+try { 
+    const phpModule = require('tree-sitter-php');
+    PHP = phpModule.php || phpModule;
+} catch (e) { PHP = null; }
 
 // Language to Tree-sitter module mapping
 function getLanguageModule(language, filePath = '') {
@@ -51,7 +60,7 @@ function getLanguageModule(language, filePath = '') {
     switch (lang) {
         case 'typescript':
         case 'ts':
-            return TypeScript || JavaScript; // Fallback to JS if TS not available
+            return TypeScript || JavaScript;
         case 'javascript':
         case 'js':
         case 'jsx':
@@ -64,6 +73,25 @@ function getLanguageModule(language, filePath = '') {
             return Go;
         case 'java':
             return Java;
+        case 'csharp':
+        case 'c#':
+        case 'cs':
+            return CSharp;
+        case 'ruby':
+        case 'rb':
+            return Ruby;
+        case 'c':
+            return C;
+        case 'cpp':
+        case 'c++':
+        case 'cc':
+        case 'cxx':
+            return Cpp;
+        case 'rust':
+        case 'rs':
+            return Rust;
+        case 'php':
+            return PHP;
         default:
             return null;
     }
@@ -165,26 +193,37 @@ class CodeAnalyzer {
                 }
             } catch (e) {}
             
-            // Fallback: find identifier child directly
-            // For methods/functions: skip type_identifier (return type), take regular identifier (name)
+            // Fallback: find name in children (handles all grammars)
             const nodeType = node.type;
             const isMethodOrFunc = nodeType.includes('method') || nodeType.includes('function') || nodeType.includes('constructor');
             
-            let firstIdentifier = null;
+            let foundName = null;
             for (let i = 0; i < node.childCount; i++) {
                 const child = node.child(i);
+                
+                // Direct identifier
                 if (child.type === 'identifier') {
-                    if (isMethodOrFunc) {
-                        firstIdentifier = child.text;
-                    } else {
-                        return child.text;
+                    foundName = child.text;
+                    if (!isMethodOrFunc) return foundName;
+                }
+                // PHP uses 'name' nodes
+                if (child.type === 'name') return child.text;
+                // Ruby uses 'constant' for class names
+                if (child.type === 'constant') return child.text;
+                // Property identifier (JS/TS)
+                if (child.type === 'property_identifier') return child.text;
+                // Type identifier for classes/structs/enums (not for method return types)
+                if (child.type === 'type_identifier' && !isMethodOrFunc) return child.text;
+                // C/C++: function_declarator contains the name
+                if (child.type === 'function_declarator') {
+                    for (let j = 0; j < child.childCount; j++) {
+                        const gc = child.child(j);
+                        if (gc.type === 'identifier') return gc.text;
+                        if (gc.type === 'field_identifier') return gc.text;
                     }
                 }
-                if (child.type === 'property_identifier') return child.text;
-                if (child.type === 'type_identifier' && !isMethodOrFunc) return child.text;
             }
-            // For methods, the last identifier found is the name (after type)
-            return firstIdentifier;
+            return foundName;
         };
 
         // All languages AST node handling
@@ -431,21 +470,7 @@ class CodeAnalyzer {
                 break;
             }
             
-            // Python specific
-            case 'function_definition': {
-                const name = getName('name');
-                if (name) {
-                    return {
-                        type: 'function',
-                        name,
-                        line: startLine,
-                        endLine,
-                        signature: this._extractSignature(lineContent, 'def')
-                    };
-                }
-                break;
-            }
-            
+            // Python class_definition (function_definition handled above at line ~222)
             case 'class_definition': {
                 const name = getName('name');
                 if (name) {
@@ -568,6 +593,116 @@ class CodeAnalyzer {
                         signature: this._extractSignature(lineContent, 'enum')
                     };
                 }
+                break;
+            }
+
+            // ===== Rust =====
+            case 'function_item': {
+                const name = getName('name');
+                if (name) return { type: 'function', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'fn') };
+                break;
+            }
+            case 'struct_item': {
+                const name = getName('name');
+                if (name) return { type: 'struct', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'struct') };
+                break;
+            }
+            case 'enum_item': {
+                const name = getName('name');
+                if (name) return { type: 'enum', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'enum') };
+                break;
+            }
+            case 'trait_item': {
+                const name = getName('name');
+                if (name) return { type: 'trait', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'trait') };
+                break;
+            }
+            case 'impl_item': {
+                const name = getName('type') || getName('name');
+                if (name) return { type: 'impl', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'impl') };
+                break;
+            }
+
+            // ===== Ruby =====
+            case 'method': {
+                const name = getName('name');
+                if (name) {
+                    const parentType = node.parent?.type || '';
+                    const isClassMethod = parentType === 'body_statement' || parentType === 'class' || parentType === 'module';
+                    return { type: isClassMethod ? 'method' : 'function', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'def') };
+                }
+                break;
+            }
+            case 'singleton_method': {
+                const name = getName('name');
+                if (name) return { type: 'method', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'def') };
+                break;
+            }
+            // Ruby: 'class' node (not class_declaration)
+            // Also used as top-level 'class' keyword by some grammars
+            // Already handled by case 'class': above for JS/TS
+
+            // ===== Ruby module =====
+            case 'module': {
+                const name = getName('name');
+                if (name) return { type: 'module', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'module') };
+                break;
+            }
+
+            // ===== C/C++ =====
+            case 'class_specifier': {
+                const name = getName('name');
+                if (name) return { type: 'class', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'class') };
+                break;
+            }
+            case 'struct_specifier': {
+                const name = getName('name');
+                if (name) return { type: 'struct', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'struct') };
+                break;
+            }
+            case 'union_specifier': {
+                const name = getName('name');
+                if (name) return { type: 'union', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'union') };
+                break;
+            }
+            case 'type_definition': {
+                const name = getName('declarator') || getName('name');
+                if (name) return { type: 'type', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'typedef') };
+                break;
+            }
+            case 'preproc_def': {
+                const name = getName('name');
+                if (name) return { type: 'macro', name, line: startLine, endLine, signature: lineContent.trim() };
+                break;
+            }
+
+            // ===== PHP =====
+            case 'function_definition': // PHP uses same as Python - already handled above
+            case 'namespace_definition': {
+                const name = getName('name');
+                if (name) return { type: 'namespace', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'namespace') };
+                break;
+            }
+
+            // ===== C# =====
+            case 'namespace_declaration': {
+                const name = getName('name');
+                if (name) return { type: 'namespace', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'namespace') };
+                break;
+            }
+            case 'struct_declaration': {
+                const name = getName('name');
+                if (name) return { type: 'struct', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'struct') };
+                break;
+            }
+            case 'property_declaration': {
+                const name = getName('name');
+                if (name) return { type: 'property', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'property') };
+                break;
+            }
+            case 'delegate_declaration': {
+                const name = getName('name');
+                if (name) return { type: 'delegate', name, line: startLine, endLine, signature: this._extractSignature(lineContent, 'delegate') };
                 break;
             }
         }
