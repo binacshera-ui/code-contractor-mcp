@@ -155,34 +155,56 @@ class CodeAnalyzer {
         // Get the line content for signature
         const lineContent = lines[node.startPosition.row] || '';
         
-        // Helper to get name from node
+        // Helper to get name from node (safe for all tree-sitter grammars)
         const getName = (nameField) => {
-            const nameNode = node.childForFieldName(nameField);
-            if (nameNode) return nameNode.text;
+            // Try field-based access first (not all grammars support this)
+            try {
+                if (typeof node.childForFieldName === 'function') {
+                    const nameNode = node.childForFieldName(nameField);
+                    if (nameNode) return nameNode.text;
+                }
+            } catch (e) {}
             
-            // Try to find identifier child
+            // Fallback: find identifier child directly
+            // For methods/functions: skip type_identifier (return type), take regular identifier (name)
+            const nodeType = node.type;
+            const isMethodOrFunc = nodeType.includes('method') || nodeType.includes('function') || nodeType.includes('constructor');
+            
+            let firstIdentifier = null;
             for (let i = 0; i < node.childCount; i++) {
                 const child = node.child(i);
-                if (child.type === 'identifier' || child.type === 'property_identifier' || child.type === 'type_identifier') {
-                    return child.text;
+                if (child.type === 'identifier') {
+                    if (isMethodOrFunc) {
+                        firstIdentifier = child.text;
+                    } else {
+                        return child.text;
+                    }
                 }
+                if (child.type === 'property_identifier') return child.text;
+                if (child.type === 'type_identifier' && !isMethodOrFunc) return child.text;
             }
-            return null;
+            // For methods, the last identifier found is the name (after type)
+            return firstIdentifier;
         };
 
-        // JavaScript/TypeScript specific nodes
+        // All languages AST node handling
         switch (type) {
-            // Functions
+            // Functions (or methods if parent is a class body)
             case 'function_declaration':
             case 'function_definition': {
                 const name = getName('name') || getName('id');
                 if (name) {
+                    // Check if inside a class (Python methods, etc.)
+                    const parentType = node.parent?.type || '';
+                    const isMethod = parentType === 'block' && node.parent?.parent?.type === 'class_definition' ||
+                                     parentType === 'class_body' || parentType === 'class_definition' ||
+                                     parentType === 'declaration_list';
                     return {
-                        type: 'function',
+                        type: isMethod ? 'method' : 'function',
                         name,
                         line: startLine,
                         endLine,
-                        signature: this._extractSignature(lineContent, 'function')
+                        signature: this._extractSignature(lineContent, isMethod ? 'method' : 'function')
                     };
                 }
                 break;
@@ -960,9 +982,11 @@ class CodeAnalyzer {
         if (item && item.name === targetName) {
             const typeMatches = (
                 (type === 'function' && (item.type === 'function' || item.type === 'method')) ||
+                (type === 'method' && (item.type === 'method' || item.type === 'function')) ||
                 (type === 'class' && item.type === 'class') ||
                 (type === 'interface' && item.type === 'interface') ||
                 (type === 'type' && (item.type === 'type' || item.type === 'interface')) ||
+                (type === 'enum' && item.type === 'enum') ||
                 type === item.type
             );
             
@@ -985,57 +1009,124 @@ class CodeAnalyzer {
     _replaceElementWithRegex(sourceCode, targetName, type, newContent) {
         const lines = sourceCode.split('\n');
         const escapedName = targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const lang = this.language;
         
-        // Find the start line
-        let startPattern;
+        // Build start patterns for ALL languages
+        const startPatterns = [];
+        
         switch (type) {
             case 'function':
-                startPattern = new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function\\s+${escapedName}|(?:const|let|var)\\s+${escapedName}\\s*=)`, 'm');
+                // JS/TS: function name, async function name, const name =, export function
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?(?:async\\s+)?function\\s+${escapedName}\\b`));
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?(?:const|let|var)\\s+${escapedName}\\s*=`));
+                // Python: def name
+                startPatterns.push(new RegExp(`^\\s*(?:async\\s+)?def\\s+${escapedName}\\s*\\(`));
+                // Go: func name
+                startPatterns.push(new RegExp(`^\\s*func\\s+${escapedName}\\s*\\(`));
+                // Java/C#: public/private/static returnType name(
+                startPatterns.push(new RegExp(`^\\s*(?:public|private|protected|static|final|abstract|synchronized|\\w+\\s+)*\\w+\\s+${escapedName}\\s*\\(`));
+                break;
+            case 'method':
+                // JS/TS class method: name( or async name(
+                startPatterns.push(new RegExp(`^\\s*(?:async\\s+)?${escapedName}\\s*\\(`));
+                startPatterns.push(new RegExp(`^\\s*(?:static\\s+)?(?:async\\s+)?${escapedName}\\s*\\(`));
+                // Python: def name(self
+                startPatterns.push(new RegExp(`^\\s*(?:async\\s+)?def\\s+${escapedName}\\s*\\(`));
+                // Go: func (receiver) name
+                startPatterns.push(new RegExp(`^\\s*func\\s+\\([^)]+\\)\\s+${escapedName}\\s*\\(`));
+                // Java: public/private type name(
+                startPatterns.push(new RegExp(`^\\s*(?:public|private|protected|static|final|abstract|synchronized|\\w+\\s+)*\\w+\\s+${escapedName}\\s*\\(`));
                 break;
             case 'class':
-                startPattern = new RegExp(`^(?:export\\s+)?(?:abstract\\s+)?class\\s+${escapedName}`, 'm');
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?(?:abstract\\s+)?class\\s+${escapedName}\\b`));
+                // Python class
+                startPatterns.push(new RegExp(`^\\s*class\\s+${escapedName}\\s*[:(]`));
+                // Java: public class
+                startPatterns.push(new RegExp(`^\\s*(?:public|private|protected|abstract|final|static)?\\s*class\\s+${escapedName}\\b`));
                 break;
             case 'interface':
-                startPattern = new RegExp(`^(?:export\\s+)?interface\\s+${escapedName}`, 'm');
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?interface\\s+${escapedName}\\b`));
+                // Go/Java interface
+                startPatterns.push(new RegExp(`^\\s*(?:public\\s+)?interface\\s+${escapedName}\\b`));
+                // Go: type Name interface
+                startPatterns.push(new RegExp(`^\\s*type\\s+${escapedName}\\s+interface\\b`));
                 break;
             case 'type':
-                startPattern = new RegExp(`^(?:export\\s+)?type\\s+${escapedName}`, 'm');
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?type\\s+${escapedName}\\b`));
+                // Go: type Name struct
+                startPatterns.push(new RegExp(`^\\s*type\\s+${escapedName}\\s+`));
+                break;
+            case 'enum':
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?enum\\s+${escapedName}\\b`));
+                startPatterns.push(new RegExp(`^\\s*(?:public\\s+)?enum\\s+${escapedName}\\b`));
                 break;
             default:
-                throw new Error(`Unsupported type for replacement: ${type}`);
+                // Try all common patterns as fallback
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?(?:async\\s+)?function\\s+${escapedName}\\b`));
+                startPatterns.push(new RegExp(`^\\s*(?:async\\s+)?def\\s+${escapedName}\\s*\\(`));
+                startPatterns.push(new RegExp(`^\\s*func\\s+${escapedName}\\s*\\(`));
+                startPatterns.push(new RegExp(`^\\s*(?:export\\s+)?class\\s+${escapedName}\\b`));
+                startPatterns.push(new RegExp(`^\\s*class\\s+${escapedName}\\s*[:(]`));
+                break;
         }
         
+        // Find start line using any matching pattern
         let startIdx = -1;
         for (let i = 0; i < lines.length; i++) {
-            if (startPattern.test(lines[i])) {
-                startIdx = i;
-                break;
+            for (const pattern of startPatterns) {
+                if (pattern.test(lines[i])) {
+                    startIdx = i;
+                    break;
+                }
             }
+            if (startIdx !== -1) break;
         }
         
         if (startIdx === -1) {
             throw new Error(`Element '${targetName}' of type '${type}' not found.`);
         }
         
-        // Find the end (matching braces)
-        let braceCount = 0;
-        let endIdx = startIdx;
-        let foundBrace = false;
+        // Detect block style: braces ({}) or indentation (Python)
+        const isPythonStyle = lang === 'python' || /^\s*(?:async\s+)?def\s/.test(lines[startIdx]) || /^\s*class\s/.test(lines[startIdx]);
         
-        for (let i = startIdx; i < lines.length; i++) {
-            const line = lines[i];
-            for (const char of line) {
-                if (char === '{') {
-                    braceCount++;
-                    foundBrace = true;
-                } else if (char === '}') {
-                    braceCount--;
-                }
-            }
+        let endIdx = startIdx;
+        
+        if (isPythonStyle && !lines[startIdx].includes('{')) {
+            // Python-style: indentation-based block detection
+            const baseIndent = lines[startIdx].match(/^(\s*)/)[1].length;
             
-            if (foundBrace && braceCount === 0) {
+            for (let i = startIdx + 1; i < lines.length; i++) {
+                const line = lines[i];
+                // Empty lines are part of the block
+                if (line.trim() === '') {
+                    endIdx = i;
+                    continue;
+                }
+                const indent = line.match(/^(\s*)/)[1].length;
+                if (indent <= baseIndent) {
+                    // Went back to same or lower indentation - block ended at previous line
+                    // Trim trailing empty lines
+                    while (endIdx > startIdx && lines[endIdx].trim() === '') endIdx--;
+                    break;
+                }
                 endIdx = i;
-                break;
+            }
+        } else {
+            // Brace-based block detection (JS/TS/Go/Java/C#)
+            let braceCount = 0;
+            let foundBrace = false;
+            
+            for (let i = startIdx; i < lines.length; i++) {
+                const line = lines[i];
+                for (const char of line) {
+                    if (char === '{') { braceCount++; foundBrace = true; }
+                    else if (char === '}') { braceCount--; }
+                }
+                
+                if (foundBrace && braceCount === 0) {
+                    endIdx = i;
+                    break;
+                }
             }
         }
         
